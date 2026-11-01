@@ -1,0 +1,28 @@
+# Secretos y entorno
+.env
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+env/
+
+# Datos y Pesos de Modelos (esenciales para tesis)
+data/
+models/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.onnx
+*.h5
+
+# Logs y métricas de entrenamiento/evaluación
+wandb/
+runs/
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
