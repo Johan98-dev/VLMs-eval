@@ -1,0 +1,95 @@
+{
+  "run_name": "slidechat_bcnb_pilot20",
+  "timestamp_utc": "2026-11-02T05:35:06.870513+00:00",
+  "seed": 42,
+  "cohorts": [
+    "BCNB"
+  ],
+  "limit": 20,
+  "model_metadata": {
+    "model_name": "SlideChat",
+    "checkpoint_path": "/media/adalab/bodega/JohanAlbarracin/Models/SlideChat",
+    "base_llm_path": "/media/adalab/bodega/JohanAlbarracin/Models/Qwen2.5-7B-Instruct",
+    "device": "cuda:0",
+    "dtype": "torch.bfloat16",
+    "max_patches": 38400
+  },
+  "metrics": {
+    "total_samples": 20,
+    "correct_samples": 11,
+    "unparsed_samples": 0,
+    "overall_accuracy": 0.55,
+    "by_question_type": {
+      "multiple_choice": {
+        "correct": 3,
+        "total": 9,
+        "accuracy": 0.3333
+      },
+      "binary": {
+        "correct": 5,
+        "total": 7,
+        "accuracy": 0.7143
+      },
+      "binary_yes_no": {
+        "correct": 3,
+        "total": 4,
+        "accuracy": 0.75
+      }
+    },
+    "by_task": {
+      "Tumor": {
+        "correct": 2,
+        "total": 3,
+        "accuracy": 0.6667
+      },
+      "ER": {
+        "correct": 2,
+        "total": 3,
+        "accuracy": 0.6667
+      },
+      "PR": {
+        "correct": 1,
+        "total": 2,
+        "accuracy": 0.5
+      },
+      "HER2": {
+        "correct": 2,
+        "total": 2,
+        "accuracy": 1.0
+      },
+      "HER2 Expression": {
+        "correct": 0,
+        "total": 2,
+        "accuracy": 0.0
+      },
+      "Histological grading": {
+        "correct": 0,
+        "total": 2,
+        "accuracy": 0.0
+      },
+      "Molecular subtype": {
+        "correct": 1,
+        "total": 2,
+        "accuracy": 0.5
+      },
+      "ER (Yes/No)": {
+        "correct": 1,
+        "total": 2,
+        "accuracy": 0.5
+      },
+      "PR (Yes/No)": {
+        "correct": 2,
+        "total": 2,
+        "accuracy": 1.0
+      }
+    },
+    "by_cohort": {
+      "BCNB": {
+        "correct": 11,
+        "total": 20,
+        "accuracy": 0.55
+      }
+    }
+  },
+  "predictions_file": "/media/adalab/bodega/JohanAlbarracin/VLMs-eval/results/stage1_vqa/slidechat_bcnb_pilot20_predictions.jsonl"
+}

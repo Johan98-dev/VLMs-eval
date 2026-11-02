@@ -10,8 +10,9 @@ __pycache__/
 env/
 
 # Datos y Pesos de Modelos (esenciales para tesis)
-data/
-models/
+/data/
+/models/
+!src/models/
 *.safetensors
 *.bin
 *.pt
@@ -26,3 +27,6 @@ runs/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# IDE and Editor settings
+.vscode/

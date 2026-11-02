@@ -1,0 +1,94 @@
+{
+  "run_name": "prism2_bcnb_pilot20",
+  "timestamp_utc": "2026-11-02T06:15:32.814332+00:00",
+  "seed": 42,
+  "cohorts": [
+    "BCNB"
+  ],
+  "limit": 20,
+  "model_metadata": {
+    "model_name": "prism2",
+    "prism2_dir": "/media/adalab/bodega/JohanAlbarracin/Models/PRISM2",
+    "virchow2_dir": "/media/adalab/bodega/JohanAlbarracin/Models/Encoders/Virchow2",
+    "device": "cuda:0",
+    "dtype": "torch.bfloat16"
+  },
+  "metrics": {
+    "total_samples": 20,
+    "correct_samples": 14,
+    "unparsed_samples": 0,
+    "overall_accuracy": 0.7,
+    "by_question_type": {
+      "multiple_choice": {
+        "correct": 6,
+        "total": 9,
+        "accuracy": 0.6667
+      },
+      "binary": {
+        "correct": 6,
+        "total": 7,
+        "accuracy": 0.8571
+      },
+      "binary_yes_no": {
+        "correct": 2,
+        "total": 4,
+        "accuracy": 0.5
+      }
+    },
+    "by_task": {
+      "Tumor": {
+        "correct": 2,
+        "total": 3,
+        "accuracy": 0.6667
+      },
+      "ER": {
+        "correct": 2,
+        "total": 3,
+        "accuracy": 0.6667
+      },
+      "PR": {
+        "correct": 2,
+        "total": 2,
+        "accuracy": 1.0
+      },
+      "HER2": {
+        "correct": 2,
+        "total": 2,
+        "accuracy": 1.0
+      },
+      "HER2 Expression": {
+        "correct": 2,
+        "total": 2,
+        "accuracy": 1.0
+      },
+      "Histological grading": {
+        "correct": 0,
+        "total": 2,
+        "accuracy": 0.0
+      },
+      "Molecular subtype": {
+        "correct": 2,
+        "total": 2,
+        "accuracy": 1.0
+      },
+      "ER (Yes/No)": {
+        "correct": 1,
+        "total": 2,
+        "accuracy": 0.5
+      },
+      "PR (Yes/No)": {
+        "correct": 1,
+        "total": 2,
+        "accuracy": 0.5
+      }
+    },
+    "by_cohort": {
+      "BCNB": {
+        "correct": 14,
+        "total": 20,
+        "accuracy": 0.7
+      }
+    }
+  },
+  "predictions_file": "/media/adalab/bodega/JohanAlbarracin/VLMs-eval/results/stage1_vqa/prism2_bcnb_pilot20_predictions.jsonl"
+}

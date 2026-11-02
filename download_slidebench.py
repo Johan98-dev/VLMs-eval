@@ -238,8 +238,8 @@ def _download_histai_single(
     dest = repo_dest_dir / rel_path
     if dest.exists() and dest.stat().st_size > 0:
         return True, f"Skipped: {dest.name}"
-    dest.parent.mkdir(parents=True, exist_ok=True)
     try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
         hf_hub_download(
             repo_id=repo_id,
             filename=rel_path,
@@ -250,6 +250,8 @@ def _download_histai_single(
         )
         return True, f"Downloaded: {dest.name}"
     except Exception as exc:
+        if dest.parent.exists() and not any(dest.parent.iterdir()):
+            dest.parent.rmdir()
         return False, f"Failed {repo_id}/{rel_path}: {exc}"
 
 
@@ -264,29 +266,74 @@ def download_histai_wsis(
 
     token = os.getenv("HF_TOKEN")
     print(f"=== Downloading Histai WSIs ({len(slides)} unique slides) ===")
-    failures = []
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {}
-        for repo_id, rel_path in slides:
-            repo_short = repo_id.split("/", 1)[1]
-            repo_dest_dir = dirs["Histai_WSI"] / repo_short
-            futures[
-                executor.submit(
-                    _download_histai_single,
-                    repo_id,
-                    rel_path,
-                    repo_dest_dir,
-                    dirs["HF_CACHE"] / "hub",
-                    token,
-                )
-            ] = (repo_id, rel_path)
 
-        for future in tqdm(
-            as_completed(futures), total=len(futures), desc="Histai WSIs"
-        ):
-            ok, msg = future.result()
-            if not ok:
-                failures.append(msg)
+    # Pre-check gated file access per repository to avoid thousands of 403 requests
+    sample_per_repo: Dict[str, str] = {}
+    for repo_id, rel_path in slides:
+        sample_per_repo.setdefault(repo_id, rel_path)
+
+    approved_repos: Set[str] = set()
+    for repo_id, sample_rel_path in sorted(sample_per_repo.items()):
+        repo_short = repo_id.split("/", 1)[1]
+        repo_dest_dir = dirs["Histai_WSI"] / repo_short
+        ok, msg = _download_histai_single(
+            repo_id,
+            sample_rel_path,
+            repo_dest_dir,
+            dirs["HF_CACHE"] / "hub",
+            token,
+        )
+        if ok:
+            approved_repos.add(repo_id)
+            print(f"  [Access OK] {repo_id}")
+        else:
+            first_line = msg.splitlines()[0]
+            print(f"  [Access Pending/Denied] {repo_id}: {first_line}")
+
+    active_slides = [
+        (repo_id, rel_path)
+        for repo_id, rel_path in slides
+        if repo_id in approved_repos
+    ]
+    if not active_slides:
+        print(
+            "No Histai repositories currently have approved gated access. "
+            "Re-run `--phase histai` once your Hugging Face access request is approved."
+        )
+        return
+
+    failures = []
+    batch_size = 40
+    with tqdm(total=len(active_slides), desc="Histai WSIs") as pbar:
+        for start in range(0, len(active_slides), batch_size):
+            batch = active_slides[start : start + batch_size]
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {}
+                for repo_id, rel_path in batch:
+                    repo_short = repo_id.split("/", 1)[1]
+                    repo_dest_dir = dirs["Histai_WSI"] / repo_short
+                    futures[
+                        executor.submit(
+                            _download_histai_single,
+                            repo_id,
+                            rel_path,
+                            repo_dest_dir,
+                            dirs["HF_CACHE"] / "hub",
+                            token,
+                        )
+                    ] = (repo_id, rel_path)
+
+                for future in as_completed(futures):
+                    ok, msg = future.result()
+                    if not ok:
+                        failures.append(msg)
+                    pbar.update(1)
+
+            # Periodically clean temporary Xet reconstruction caches between batches
+            shutil.rmtree(dirs["HF_CACHE"] / "xet", ignore_errors=True)
+            for sub in dirs["Histai_WSI"].iterdir():
+                if sub.is_dir():
+                    shutil.rmtree(sub / ".cache", ignore_errors=True)
 
     if failures:
         print(f"Completed with {len(failures)} failed downloads:")
