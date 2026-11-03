@@ -1,0 +1,59 @@
+{
+  "run_name": "mllm-hwsi_cptac_full",
+  "timestamp_utc": "2026-11-03T22:06:32.756102+00:00",
+  "seed": 42,
+  "cohorts": [
+    "CPTAC"
+  ],
+  "limit": 0,
+  "model_metadata": {
+    "model_name": "mllm-hwsi",
+    "mllm_hwsi_dir": "/media/adalab/bodega/JohanAlbarracin/Models/MLLM-HWSI",
+    "encoders_dir": "/media/adalab/bodega/JohanAlbarracin/Models/Encoders",
+    "device": "cuda:1",
+    "dtype": "torch.float16"
+  },
+  "metrics": {
+    "total_samples": 240,
+    "correct_samples": 57,
+    "unparsed_samples": 0,
+    "overall_accuracy": 0.2375,
+    "by_question_type": {
+      "multiple_choice": {
+        "correct": 57,
+        "total": 240,
+        "accuracy": 0.2375
+      }
+    },
+    "by_task": {
+      "CM": {
+        "correct": 5,
+        "total": 60,
+        "accuracy": 0.0833
+      },
+      "LSCC": {
+        "correct": 4,
+        "total": 60,
+        "accuracy": 0.0667
+      },
+      "LUAD": {
+        "correct": 22,
+        "total": 60,
+        "accuracy": 0.3667
+      },
+      "UCEC": {
+        "correct": 26,
+        "total": 60,
+        "accuracy": 0.4333
+      }
+    },
+    "by_cohort": {
+      "CPTAC": {
+        "correct": 57,
+        "total": 240,
+        "accuracy": 0.2375
+      }
+    }
+  },
+  "predictions_file": "/media/adalab/bodega/JohanAlbarracin/VLMs-eval/results/stage1_vqa/mllm-hwsi_cptac_full_predictions.jsonl"
+}

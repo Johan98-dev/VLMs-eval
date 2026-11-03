@@ -1,0 +1,60 @@
+{
+  "run_name": "slidechat_cptac_full",
+  "timestamp_utc": "2026-11-03T21:08:47.725857+00:00",
+  "seed": 42,
+  "cohorts": [
+    "CPTAC"
+  ],
+  "limit": 0,
+  "model_metadata": {
+    "model_name": "SlideChat",
+    "checkpoint_path": "/media/adalab/bodega/JohanAlbarracin/Models/SlideChat",
+    "base_llm_path": "/media/adalab/bodega/JohanAlbarracin/Models/Qwen2.5-7B-Instruct",
+    "device": "cuda:0",
+    "dtype": "torch.bfloat16",
+    "max_patches": 38400
+  },
+  "metrics": {
+    "total_samples": 240,
+    "correct_samples": 121,
+    "unparsed_samples": 0,
+    "overall_accuracy": 0.5042,
+    "by_question_type": {
+      "multiple_choice": {
+        "correct": 121,
+        "total": 240,
+        "accuracy": 0.5042
+      }
+    },
+    "by_task": {
+      "CM": {
+        "correct": 31,
+        "total": 60,
+        "accuracy": 0.5167
+      },
+      "LSCC": {
+        "correct": 35,
+        "total": 60,
+        "accuracy": 0.5833
+      },
+      "LUAD": {
+        "correct": 24,
+        "total": 60,
+        "accuracy": 0.4
+      },
+      "UCEC": {
+        "correct": 31,
+        "total": 60,
+        "accuracy": 0.5167
+      }
+    },
+    "by_cohort": {
+      "CPTAC": {
+        "correct": 121,
+        "total": 240,
+        "accuracy": 0.5042
+      }
+    }
+  },
+  "predictions_file": "/media/adalab/bodega/JohanAlbarracin/VLMs-eval/results/stage1_vqa/slidechat_cptac_full_predictions.jsonl"
+}
