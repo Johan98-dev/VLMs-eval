@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+import ctypes
 from functools import partial
 import json
 import math
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image
 from safetensors.torch import load_file
-from scipy.ndimage import label as connected_components
+from scipy.ndimage import find_objects, label as connected_components
 import timm
 from timm.data import resolve_data_config
 from timm.data.transforms_factory import create_transform
@@ -29,11 +30,163 @@ Image.MAX_IMAGE_PIXELS = None
 
 
 # ---------------------------------------------------------------------------
+# Native OpenSlide (.svs / .tiff) + PIL (.jpg / .png) Unified WSI Reader
+# ---------------------------------------------------------------------------
+
+_OPENSLIDE_LIB: Optional[Any] = None
+_OPENSLIDE_CHECKED: bool = False
+_WSI_PYRAMID_EXTS = {".svs", ".tiff", ".tif", ".ndpi", ".mrxs", ".scn", ".bif"}
+
+
+def _get_openslide_lib() -> Optional[Any]:
+    """Load `libopenslide.so.0` (Linux) or `libopenslide-0.dll` (Windows) via ctypes if present."""
+    global _OPENSLIDE_LIB, _OPENSLIDE_CHECKED
+    if _OPENSLIDE_CHECKED:
+        return _OPENSLIDE_LIB
+    _OPENSLIDE_CHECKED = True
+    for lib_name in ("libopenslide.so.0", "libopenslide.so", "libopenslide-0.dll"):
+        try:
+            lib = ctypes.cdll.LoadLibrary(lib_name)
+            lib.openslide_open.argtypes = [ctypes.c_char_p]
+            lib.openslide_open.restype = ctypes.c_void_p
+            lib.openslide_close.argtypes = [ctypes.c_void_p]
+            lib.openslide_close.restype = None
+            lib.openslide_get_level_count.argtypes = [ctypes.c_void_p]
+            lib.openslide_get_level_count.restype = ctypes.c_int32
+            lib.openslide_get_level_dimensions.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_int32,
+                ctypes.POINTER(ctypes.c_int64),
+                ctypes.POINTER(ctypes.c_int64),
+            ]
+            lib.openslide_get_level_dimensions.restype = None
+            lib.openslide_read_region.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_uint32),
+                ctypes.c_int64,
+                ctypes.c_int64,
+                ctypes.c_int32,
+                ctypes.c_int64,
+                ctypes.c_int64,
+            ]
+            lib.openslide_read_region.restype = None
+            _OPENSLIDE_LIB = lib
+            break
+        except OSError:
+            continue
+    return _OPENSLIDE_LIB
+
+
+class WSIReader:
+    """Unified Whole-Slide Image reader supporting pyramidal `.svs`/`.tiff` via OpenSlide and `.jpg` via PIL."""
+
+    def __init__(self, wsi_path: Path) -> None:
+        self.wsi_path = wsi_path
+        self._osr: Optional[int] = None
+        self._lib: Optional[Any] = None
+        self._pil_img: Optional[Image.Image] = None
+        self._pil_rgb: Optional[Image.Image] = None
+        self.size: Tuple[int, int] = (0, 0)
+
+        lib = _get_openslide_lib() if wsi_path.suffix.lower() in _WSI_PYRAMID_EXTS else None
+        if lib is not None:
+            osr = lib.openslide_open(str(wsi_path).encode("utf-8"))
+            if osr:
+                self._lib = lib
+                self._osr = osr
+                w0, h0 = ctypes.c_int64(), ctypes.c_int64()
+                lib.openslide_get_level_dimensions(osr, 0, ctypes.byref(w0), ctypes.byref(h0))
+                self.size = (int(w0.value), int(h0.value))
+                return
+
+        self._pil_img = Image.open(wsi_path)
+        self.size = self._pil_img.size
+
+    def __enter__(self) -> "WSIReader":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Release OpenSlide or PIL file handles."""
+        if self._osr is not None and self._lib is not None:
+            self._lib.openslide_close(self._osr)
+            self._osr = None
+        if self._pil_img is not None:
+            self._pil_img.close()
+            self._pil_img = None
+            self._pil_rgb = None
+
+    def _read_openslide_rgba_to_rgb(self, x: int, y: int, level: int, w: int, h: int) -> np.ndarray:
+        assert self._osr is not None and self._lib is not None
+        buf = np.empty((h, w), dtype=np.uint32)
+        self._lib.openslide_read_region(
+            self._osr,
+            buf.ctypes.data_as(ctypes.POINTER(ctypes.c_uint32)),
+            int(x),
+            int(y),
+            int(level),
+            int(w),
+            int(h),
+        )
+        bgra = buf.view(np.uint8).reshape(h, w, 4)
+        rgb = bgra[:, :, [2, 1, 0]].copy()
+        alpha = bgra[:, :, 3]
+        if not np.all(alpha == 255):
+            rgb[alpha == 0] = 255
+        return rgb
+
+    def read_thumbnail(self, scale: int = 16) -> np.ndarray:
+        """Return an RGB thumbnail ndarray downsampled by approximately `scale` from level 0."""
+        w0, h0 = self.size
+        target_w, target_h = max(1, w0 // scale), max(1, h0 // scale)
+
+        if self._osr is not None and self._lib is not None:
+            lvl_cnt = int(self._lib.openslide_get_level_count(self._osr))
+            best_lvl = lvl_cnt - 1
+            wL, hL = ctypes.c_int64(), ctypes.c_int64()
+            self._lib.openslide_get_level_dimensions(
+                self._osr, best_lvl, ctypes.byref(wL), ctypes.byref(hL)
+            )
+            rgb_low = self._read_openslide_rgba_to_rgb(0, 0, best_lvl, int(wL.value), int(hL.value))
+            if (int(wL.value), int(hL.value)) == (target_w, target_h):
+                return rgb_low
+            return np.asarray(
+                Image.fromarray(rgb_low, mode="RGB").resize(
+                    (target_w, target_h), resample=Image.Resampling.BILINEAR
+                )
+            )
+
+        assert self._pil_img is not None
+        if self._pil_rgb is None:
+            self._pil_rgb = self._pil_img.convert("RGB")
+        return np.asarray(
+            self._pil_rgb.resize((target_w, target_h), resample=Image.Resampling.BILINEAR)
+        )
+
+    def crop(self, x: int, y: int, size: int) -> Image.Image:
+        """Crop a `size x size` RGB patch at level-0 coordinates `(x, y)`, padding with white if out of bounds."""
+        if self._osr is not None and self._lib is not None:
+            rgb = self._read_openslide_rgba_to_rgb(x, y, 0, size, size)
+            return Image.fromarray(rgb, mode="RGB")
+
+        assert self._pil_img is not None
+        if self._pil_rgb is None:
+            self._pil_rgb = self._pil_img.convert("RGB")
+        return crop_with_padding(self._pil_rgb, x, y, size)
+
+
+# ---------------------------------------------------------------------------
 # Coordinate discovery from WSI / SlideBench ROI annotations
 # ---------------------------------------------------------------------------
 
 
-def discover_tissue_patch_coords_256(wsi_path: Path, feature_csv_path: Optional[Path] = None) -> List[Tuple[int, int]]:
+def discover_tissue_patch_coords_256(
+    wsi_path: Path,
+    feature_csv_path: Optional[Path] = None,
+    max_patches: int = 1024,
+) -> List[Tuple[int, int]]:
     """Return (x, y) top-left coordinates for 256x256 tissue patches of a slide.
 
     Uses exact ROI polygon bounding boxes and patch offsets when SlideBench JSON + CSV
@@ -82,31 +235,42 @@ def discover_tissue_patch_coords_256(wsi_path: Path, feature_csv_path: Optional[
                 for y in range(min_y, max(min_y + 1, max_y - 255), 256):
                     coords.append((x, y))
         if coords:
+            if max_patches > 0 and len(coords) > max_patches:
+                idx = np.linspace(0, len(coords) - 1, max_patches, dtype=int)
+                coords = [coords[i] for i in idx]
             return coords
 
-    with Image.open(wsi_path) as im:
-        w, h = im.size
-        scale = 16
-        thumb = np.asarray(im.convert("RGB").resize((max(1, w // scale), max(1, h // scale))))
-    sat = thumb.max(axis=-1).astype(np.int32) - thumb.min(axis=-1).astype(np.int32)
+    scale = 16
+    with WSIReader(wsi_path) as reader:
+        w, h = reader.size
+        thumb = reader.read_thumbnail(scale=scale)
+
+    sat = thumb.max(axis=-1).astype(np.float32) - thumb.min(axis=-1).astype(np.float32)
+    gray = thumb.mean(axis=-1).astype(np.float32)
     coords = []
     step = 256 // scale
     for gy in range(0, thumb.shape[0] - step + 1, step):
         for gx in range(0, thumb.shape[1] - step + 1, step):
-            if sat[gy : gy + step, gx : gx + step].mean() > 12.0:
+            block_sat = float(sat[gy : gy + step, gx : gx + step].mean())
+            block_gray = float(gray[gy : gy + step, gx : gx + step].mean())
+            if block_sat > 12.0 and 30.0 < block_gray < 238.0:
                 coords.append((gx * scale, gy * scale))
     if not coords:
         coords.append((max(0, w // 2 - 128), max(0, h // 2 - 128)))
+    elif max_patches > 0 and len(coords) > max_patches:
+        idx = np.linspace(0, len(coords) - 1, max_patches, dtype=int)
+        coords = [coords[i] for i in idx]
     return coords
 
 
-def discover_region_coords_4096(wsi_path: Path, region_size: int = 4096) -> List[Tuple[int, int]]:
+def discover_region_coords_4096(
+    wsi_path: Path, region_size: int = 4096, max_regions: int = 16
+) -> List[Tuple[int, int]]:
     """Return (x, y) top-left coordinates for 4096x4096 tissue regions of a slide."""
-    with Image.open(wsi_path) as im:
-        w, h = im.size
-
     json_path = wsi_path.with_suffix(".json")
     if json_path.is_file():
+        with WSIReader(wsi_path) as reader:
+            w, h = reader.size
         with json_path.open("r", encoding="utf-8") as f:
             js = json.load(f)
         seen_grid = set()
@@ -122,13 +286,37 @@ def discover_region_coords_4096(wsi_path: Path, region_size: int = 4096) -> List
                 seen_grid.add(grid_key)
                 regions.append((rx, ry))
         if regions:
-            return regions
+            return regions[:max_regions]
 
-    regions = []
+    scale = 16
+    with WSIReader(wsi_path) as reader:
+        w, h = reader.size
+        thumb = reader.read_thumbnail(scale=scale)
+
+    sat = thumb.max(axis=-1).astype(np.float32) - thumb.min(axis=-1).astype(np.float32)
+    gray = thumb.mean(axis=-1).astype(np.float32)
+    tissue_mask = (sat > 12.0) & (gray > 30.0) & (gray < 238.0)
+
+    scored_regions: List[Tuple[float, int, int]] = []
+    seen_coords = set()
+    reg_thumb = max(1, region_size // scale)
     for y in range(0, max(1, h), region_size):
         for x in range(0, max(1, w), region_size):
-            regions.append((min(x, max(0, w - region_size)), min(y, max(0, h - region_size))))
-    return regions[:16]
+            rx = min(x, max(0, w - region_size))
+            ry = min(y, max(0, h - region_size))
+            if (rx, ry) in seen_coords:
+                continue
+            seen_coords.add((rx, ry))
+            tx, ty = rx // scale, ry // scale
+            sub_mask = tissue_mask[ty : ty + reg_thumb, tx : tx + reg_thumb]
+            score = float(sub_mask.mean()) if sub_mask.size > 0 else 0.0
+            scored_regions.append((score, rx, ry))
+
+    scored_regions.sort(key=lambda item: item[0], reverse=True)
+    positive_regions = [(rx, ry) for score, rx, ry in scored_regions if score > 0.02]
+    if positive_regions:
+        return positive_regions[:max_regions]
+    return [(rx, ry) for _, rx, ry in scored_regions[: max(1, min(4, max_regions))]]
 
 
 def crop_with_padding(img: Image.Image, x: int, y: int, size: int) -> Image.Image:
@@ -192,9 +380,8 @@ class Virchow2FeatureExtractor:
             return out_path
 
         coords = discover_tissue_patch_coords_256(wsi_path, feature_csv_path=feature_csv_path)
-        with Image.open(wsi_path) as im:
-            im_rgb = im.convert("RGB")
-            tensors = [self.transform(crop_with_padding(im_rgb, x, y, 256)) for x, y in coords]
+        with WSIReader(wsi_path) as reader:
+            tensors = [self.transform(reader.crop(x, y, 256)) for x, y in coords]
 
         cls_chunks: List[torch.Tensor] = []
         use_amp = self.device.type == "cuda"
@@ -667,10 +854,9 @@ class MLLMHWSIFeatureExtractor:
         region_patch_pil: List[List[Image.Image]] = []
 
         use_amp = self.device.type == "cuda"
-        with Image.open(wsi_path) as im:
-            im_rgb = im.convert("RGB")
+        with WSIReader(wsi_path) as reader:
             for rx, ry in region_coords:
-                reg_img = crop_with_padding(im_rgb, rx, ry, 4096)
+                reg_img = reader.crop(rx, ry, 4096)
                 patches_pil: List[Image.Image] = []
                 hipt_tensors: List[torch.Tensor] = []
                 conch_tensors: List[torch.Tensor] = []
@@ -722,21 +908,30 @@ class MLLMHWSIFeatureExtractor:
             for j in range(xb_cell.shape[0]):
                 tmap = token_maps[j].float()  # (384, 16, 16)
                 inst_map, num_inst = connected_components(fg_masks[j])
+                if num_inst == 0:
+                    cell_encoded_list.append(torch.zeros((384,), dtype=torch.float32))
+                    continue
+
+                counts = np.bincount(inst_map.ravel())
+                slices = find_objects(inst_map)
                 cell_vecs: List[torch.Tensor] = []
                 for inst_id in range(1, num_inst + 1):
-                    mask_bool = inst_map == inst_id
-                    if mask_bool.sum() < 6:
+                    if counts[inst_id] < 6:
                         continue
-                    mask_t = torch.from_numpy(mask_bool.astype(np.float32))[None, None].to(self.device)
-                    pooled = F.avg_pool2d(mask_t, kernel_size=16, stride=16)[0, 0] > 0
-                    coords = pooled.nonzero(as_tuple=False)
-                    if coords.numel() == 0:
-                        ys, xs = np.where(mask_bool)
-                        ty = int(np.clip(ys.mean() // 16, 0, 15))
-                        tx = int(np.clip(xs.mean() // 16, 0, 15))
-                        cell_vecs.append(tmap[:, ty, tx])
+                    sl = slices[inst_id - 1]
+                    if sl is None:
+                        continue
+                    sy, sx = sl
+                    ty0, ty1 = sy.start // 16, (sy.stop - 1) // 16 + 1
+                    tx0, tx1 = sx.start // 16, (sx.stop - 1) // 16 + 1
+                    if ty1 - ty0 == 1 and tx1 - tx0 == 1:
+                        cell_vecs.append(tmap[:, ty0, tx0])
                     else:
-                        cell_vecs.append(tmap[:, coords[:, 0], coords[:, 1]].mean(dim=1))
+                        sub = (
+                            inst_map[ty0 * 16 : ty1 * 16, tx0 * 16 : tx1 * 16] == inst_id
+                        ).reshape(ty1 - ty0, 16, tx1 - tx0, 16).any(axis=(1, 3))
+                        ry, rx = np.nonzero(sub)
+                        cell_vecs.append(tmap[:, ty0 + ry, tx0 + rx].mean(dim=1))
 
                 if not cell_vecs:
                     cell_encoded_list.append(torch.zeros((384,), dtype=torch.float32))
@@ -754,5 +949,58 @@ class MLLMHWSIFeatureExtractor:
         }
         tmp_path = out_dir / f".{wsi_path.stem}.{os.getpid()}.pt"
         torch.save(payload, tmp_path)
+        tmp_path.replace(out_path)
+        return out_path
+
+
+# ---------------------------------------------------------------------------
+# 3. SlideChat On-Demand Feature Extractor (CONCH 512-d patch features)
+# ---------------------------------------------------------------------------
+
+
+class SlideChatConchFeatureExtractor:
+    """Extracts and caches per-slide (N, 512) CONCH patch features for SlideChat when CSVs are absent."""
+
+    def __init__(self, paths: Optional[ProjectPaths] = None, device: str = "cuda:0") -> None:
+        self.paths = paths or ProjectPaths()
+        self.device = torch.device(device if torch.cuda.is_available() else "cpu")
+        self.conch = (
+            ConchVisualEncoder(self.paths.conch_dir / "pytorch_model.bin")
+            .eval()
+            .to(self.device)
+        )
+
+    @torch.inference_mode()
+    def extract_or_load(
+        self,
+        wsi_path: Path,
+        cohort: str,
+        feature_csv_path: Optional[Path] = None,
+        batch_size: int = 64,
+    ) -> Path:
+        """Return cached SlideChat CONCH .pt path or extract and cache it in ../Datasets/."""
+        out_dir = self.paths.datasets_dir / cohort / "Feat" / "SlideChat_CONCH"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{wsi_path.stem}.pt"
+        if out_path.is_file():
+            return out_path
+
+        coords = discover_tissue_patch_coords_256(wsi_path, feature_csv_path=feature_csv_path)
+        with WSIReader(wsi_path) as reader:
+            tensors = [self.conch.preprocess(reader.crop(x, y, 256)) for x, y in coords]
+
+        feat_chunks: List[torch.Tensor] = []
+        use_amp = self.device.type == "cuda"
+        for i in range(0, len(tensors), batch_size):
+            batch = torch.stack(tensors[i : i + batch_size], dim=0).to(self.device)
+            with torch.amp.autocast(
+                device_type=self.device.type, dtype=torch.float16, enabled=use_amp
+            ):
+                feats = self.conch.encode_image(batch, normalize=False)  # (B, 512)
+            feat_chunks.append(feats.detach().float().cpu())
+
+        patch_features = torch.cat(feat_chunks, dim=0)  # (N, 512)
+        tmp_path = out_dir / f".{wsi_path.stem}.{os.getpid()}.pt"
+        torch.save(patch_features, tmp_path)
         tmp_path.replace(out_path)
         return out_path

@@ -52,6 +52,7 @@ def build_model_adapter(
             slidechat_ckpt_path=paths.slidechat_dir,
             qwen_dir=paths.qwen_dir,
             device=device,
+            paths=paths,
         )
     if model_key == "prism2":
         return PRISM2Adapter(paths=paths, device=device)

@@ -114,9 +114,12 @@ def load_slidebench_vqa_cohort(
                     wsi_path = cand_wsi
             elif cohort == "CPTAC":
                 tumor = str(row.get("Tumor", "")).strip()
-                cand_feat = cohort_dir / "Feat" / tumor / f"{slide_id}.csv"
-                if cand_feat.exists():
-                    feature_path = cand_feat
+                cand_feat_csv = cohort_dir / "Feat" / tumor / f"{slide_id}.csv"
+                cand_feat_pt = cohort_dir / "Feat" / "SlideChat_CONCH" / f"{slide_id}.pt"
+                if cand_feat_csv.exists():
+                    feature_path = cand_feat_csv
+                elif cand_feat_pt.exists():
+                    feature_path = cand_feat_pt
                 cand_wsi = cohort_dir / "WSI" / tumor / f"{slide_id}.svs"
                 if cand_wsi.exists():
                     wsi_path = cand_wsi
@@ -130,7 +133,7 @@ def load_slidebench_vqa_cohort(
                     if cand_wsi.exists():
                         wsi_path = cand_wsi
 
-            if require_features and feature_path is None:
+            if require_features and feature_path is None and wsi_path is None:
                 continue
 
             samples.append(
@@ -249,15 +252,25 @@ def select_stratified_pilot_samples(
 
 
 def load_patch_features_csv(feature_csv_path: Path, max_patches: int = 38400) -> torch.Tensor:
-    """Load 512-dimensional patch features from a SlideChat CSV file.
+    """Load 512-dimensional patch features from a SlideChat CSV or cached CONCH `.pt` file.
 
     Args:
-        feature_csv_path: Path to the slide's `.csv` patch feature file.
+        feature_csv_path: Path to the slide's `.csv` or `.pt` patch feature file.
         max_patches: Maximum number of patches to sample linearly (default: 38400).
 
     Returns:
         Float tensor of shape (1, num_patches, 512).
     """
+    if feature_csv_path.suffix == ".pt":
+        tensor = torch.load(feature_csv_path, map_location="cpu", weights_only=False).float()
+        if tensor.ndim == 3:
+            tensor = tensor.squeeze(0)
+        total_rows = tensor.shape[0]
+        if total_rows >= max_patches:
+            indices = np.linspace(0, total_rows - 1, max_patches, dtype=int)
+            tensor = tensor[indices][:max_patches]
+        return tensor.unsqueeze(0)
+
     df = pd.read_csv(feature_csv_path)
     df = df.iloc[:, :512]
     total_rows = df.shape[0]

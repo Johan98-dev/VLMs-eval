@@ -10,8 +10,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 
+from src.datasets.feature_extractor import SlideChatConchFeatureExtractor
 from src.datasets.slidebench_vqa import VQASample, load_patch_features_csv
 from src.models.base import BaseWSIVLM
+from src.utils.paths import ProjectPaths
 
 DEFAULT_IMAGE_TOKEN = "<image>"
 IMAGE_TOKEN_INDEX = -200
@@ -254,9 +256,11 @@ class SlideChatAdapter(BaseWSIVLM):
         device: str = "cuda:0",
         dtype: torch.dtype = torch.bfloat16,
         max_patches: int = 38400,
+        paths: Optional[ProjectPaths] = None,
     ) -> None:
         self.slidechat_ckpt_path = slidechat_ckpt_path
         self.qwen_dir = qwen_dir
+        self.paths = paths or ProjectPaths()
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.dtype = dtype
         self.max_patches = max_patches
@@ -265,6 +269,8 @@ class SlideChatAdapter(BaseWSIVLM):
         self.llm: Optional[Any] = None
         self.longnet_encoder: Optional[SlideChatLongNetEncoder] = None
         self.projector: Optional[SlideChatProjector] = None
+        self._conch_extractor: Optional[SlideChatConchFeatureExtractor] = None
+        self._feature_cache: Dict[str, torch.Tensor] = {}
 
     def load(self) -> None:
         """Load Qwen2.5-7B-Instruct and apply SlideChat Stage-2 weights (LLM + LongNet + Projector)."""
@@ -364,21 +370,36 @@ class SlideChatAdapter(BaseWSIVLM):
             and self.tokenizer is not None
         )
 
-        if sample.feature_path is None or not sample.feature_path.exists():
-            raise FileNotFoundError(
-                f"SlideChat requires patch feature CSV for slide {sample.slide_id}, "
-                f"but feature_path={sample.feature_path} was not found."
-            )
+        cache_key = f"{sample.cohort}:{sample.slide_id}"
+        if cache_key in self._feature_cache:
+            pixel_values = self._feature_cache[cache_key]
+        else:
+            feat_path = sample.feature_path
+            if feat_path is None or not feat_path.exists():
+                if sample.wsi_path is None or not sample.wsi_path.is_file():
+                    raise FileNotFoundError(
+                        f"SlideChat requires patch features or WSI for slide {sample.slide_id}, "
+                        f"but feature_path={sample.feature_path} and wsi_path={sample.wsi_path} were not found."
+                    )
+                if self._conch_extractor is None:
+                    self._conch_extractor = SlideChatConchFeatureExtractor(
+                        paths=self.paths, device=str(self.device)
+                    )
+                feat_path = self._conch_extractor.extract_or_load(
+                    wsi_path=sample.wsi_path,
+                    cohort=sample.cohort,
+                )
 
-        patch_feats = load_patch_features_csv(
-            sample.feature_path, max_patches=self.max_patches
-        ).to(device=self.device, dtype=self.dtype)
+            patch_feats = load_patch_features_csv(
+                feat_path, max_patches=self.max_patches
+            ).to(device=self.device, dtype=self.dtype)
 
-        # SlideChat LongNet expects (N, 1, 512) -> permute back to (1, N, 512)
-        encoded = self.longnet_encoder(
-            src_tokens=None, token_embeddings=patch_feats.permute(1, 0, 2)
-        )["encoder_out"].permute(1, 0, 2)
-        pixel_values = self.projector(encoded)
+            # SlideChat LongNet expects (N, 1, 512) -> permute back to (1, N, 512)
+            encoded = self.longnet_encoder(
+                src_tokens=None, token_embeddings=patch_feats.permute(1, 0, 2)
+            )["encoder_out"].permute(1, 0, 2)
+            pixel_values = self.projector(encoded)
+            self._feature_cache[cache_key] = pixel_values
 
         prompt_text = sample.format_closed_prompt()
         mm_inputs = self._prepare_multimodal_inputs(prompt_text, pixel_values)
