@@ -1,0 +1,80 @@
+{
+  "run_name": "slidechat_bcnb_full",
+  "timestamp_utc": "2026-11-03T04:15:32.449614+00:00",
+  "seed": 42,
+  "cohorts": [
+    "BCNB"
+  ],
+  "limit": 0,
+  "model_metadata": {
+    "model_name": "SlideChat",
+    "checkpoint_path": "/media/adalab/bodega/JohanAlbarracin/Models/SlideChat",
+    "base_llm_path": "/media/adalab/bodega/JohanAlbarracin/Models/Qwen2.5-7B-Instruct",
+    "device": "cuda:0",
+    "dtype": "torch.bfloat16",
+    "max_patches": 38400
+  },
+  "metrics": {
+    "total_samples": 7274,
+    "correct_samples": 3933,
+    "unparsed_samples": 0,
+    "overall_accuracy": 0.5407,
+    "by_question_type": {
+      "multiple_choice": {
+        "correct": 1546,
+        "total": 4100,
+        "accuracy": 0.3771
+      },
+      "binary": {
+        "correct": 2387,
+        "total": 3174,
+        "accuracy": 0.752
+      }
+    },
+    "by_task": {
+      "Tumor": {
+        "correct": 945,
+        "total": 1058,
+        "accuracy": 0.8932
+      },
+      "ER": {
+        "correct": 832,
+        "total": 1058,
+        "accuracy": 0.7864
+      },
+      "PR": {
+        "correct": 747,
+        "total": 1058,
+        "accuracy": 0.706
+      },
+      "HER2": {
+        "correct": 808,
+        "total": 1058,
+        "accuracy": 0.7637
+      },
+      "HER2 Expression": {
+        "correct": 232,
+        "total": 1058,
+        "accuracy": 0.2193
+      },
+      "Histological grading": {
+        "correct": 183,
+        "total": 926,
+        "accuracy": 0.1976
+      },
+      "Molecular subtype": {
+        "correct": 186,
+        "total": 1058,
+        "accuracy": 0.1758
+      }
+    },
+    "by_cohort": {
+      "BCNB": {
+        "correct": 3933,
+        "total": 7274,
+        "accuracy": 0.5407
+      }
+    }
+  },
+  "predictions_file": "/media/adalab/bodega/JohanAlbarracin/VLMs-eval/results/stage1_vqa/slidechat_bcnb_full_predictions.jsonl"
+}

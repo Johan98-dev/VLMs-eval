@@ -6,6 +6,7 @@ from collections import OrderedDict
 from functools import partial
 import json
 import math
+import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -205,7 +206,9 @@ class Virchow2FeatureExtractor:
             cls_chunks.append(cls_tok.detach().float().cpu())
 
         tile_embeddings = torch.cat(cls_chunks, dim=0)
-        torch.save(tile_embeddings, out_path)
+        tmp_path = out_dir / f".{wsi_path.stem}.{os.getpid()}.pt"
+        torch.save(tile_embeddings, tmp_path)
+        tmp_path.replace(out_path)
         return out_path
 
 
@@ -749,5 +752,7 @@ class MLLMHWSIFeatureExtractor:
             "patch": selected_patch_feats.unsqueeze(0),      # (1, R, 16, 512)
             "cell": cell_tensor.unsqueeze(0),                # (1, R, 16, 384)
         }
-        torch.save(payload, out_path)
+        tmp_path = out_dir / f".{wsi_path.stem}.{os.getpid()}.pt"
+        torch.save(payload, tmp_path)
+        tmp_path.replace(out_path)
         return out_path
