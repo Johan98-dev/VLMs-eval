@@ -1,0 +1,59 @@
+{
+  "run_name": "prism2_cptac_full",
+  "timestamp_utc": "2026-11-03T22:59:59.546754+00:00",
+  "seed": 42,
+  "cohorts": [
+    "CPTAC"
+  ],
+  "limit": 0,
+  "model_metadata": {
+    "model_name": "prism2",
+    "prism2_dir": "/media/adalab/bodega/JohanAlbarracin/Models/PRISM2",
+    "virchow2_dir": "/media/adalab/bodega/JohanAlbarracin/Models/Encoders/Virchow2",
+    "device": "cuda:0",
+    "dtype": "torch.bfloat16"
+  },
+  "metrics": {
+    "total_samples": 240,
+    "correct_samples": 133,
+    "unparsed_samples": 0,
+    "overall_accuracy": 0.5542,
+    "by_question_type": {
+      "multiple_choice": {
+        "correct": 133,
+        "total": 240,
+        "accuracy": 0.5542
+      }
+    },
+    "by_task": {
+      "CM": {
+        "correct": 13,
+        "total": 60,
+        "accuracy": 0.2167
+      },
+      "LSCC": {
+        "correct": 45,
+        "total": 60,
+        "accuracy": 0.75
+      },
+      "LUAD": {
+        "correct": 33,
+        "total": 60,
+        "accuracy": 0.55
+      },
+      "UCEC": {
+        "correct": 42,
+        "total": 60,
+        "accuracy": 0.7
+      }
+    },
+    "by_cohort": {
+      "CPTAC": {
+        "correct": 133,
+        "total": 240,
+        "accuracy": 0.5542
+      }
+    }
+  },
+  "predictions_file": "/media/adalab/bodega/JohanAlbarracin/VLMs-eval/results/stage1_vqa/prism2_cptac_full_predictions.jsonl"
+}
