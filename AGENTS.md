@@ -19,10 +19,17 @@
 
 The framework currently targets three pathology WSI multimodal models through unified model adapters:
 1. **SlideChat** (`General-Medical-AI/SlideChat`)
-2. **PRISM2**
-3. **MLLM-HWSI**
+2. **PRISM2** (`paige-ai/Prism2`)
+3. **MLLM-HWSI** (`Bastech/MLLM-HWSI`)
+- **Candidate Substitute / Additional WSI VLM — ALPaCA (`CNX-PathLLM/Llama-slideQA` / `ZeyuGaoAi/ALPaCA`):**
+  - `ALPaCA-Hybrid` (`Longformer + GMM` adaptor on `meta-llama/Llama-3.1-8B-Instruct` using frozen multi-scale `CONCH` patch features: `_0_1024.npy`, `_1_512.npy`, `_1_1024.npy` and pre-computed `GTEx-TCGA` GMM prototypes) may be integrated as a substitute or fourth model with 100% publicly released intermediate prototypes and weights.
 
 Each model must be encapsulated behind a clean, standardized inference interface so that dataset loading, prompt formatting, output parsing, and metric computation remain model-agnostic.
+
+### Double Validation Guarantee
+To ensure 100% adapter fidelity and confirm that lower scores on external non-TCGA cohorts (`BCNB`, `CPTAC`, `Histai`) reflect genuine out-of-distribution (OOD) generalization rather than implementation bugs:
+1. **Official Reference Feature Parity:** Verify adapters against author-provided pre-extracted features first (e.g., `BCNB_patch_feat.tar.gz` for SlideChat; `CNX-PathLLM/Llama-slideQA-Sample-Features` 40-slide TCGA/GTEx set for ALPaCA against `demo/single_wsi_demo.py`).
+2. **In-Distribution Positive Control (`SlideBench-VQA-TCGA`):** Benchmark models on `SlideBench-VQA (TCGA)` as an in-distribution positive control to certify the end-to-end extraction and inference pipeline.
 
 ---
 
