@@ -27,6 +27,8 @@ class VQASample:
     answer_text: str  # Ground-truth option text
     feature_path: Optional[Path] = None
     wsi_path: Optional[Path] = None
+    broad_category: str = ""
+    narrow_category: str = ""
 
     def format_closed_prompt(self) -> str:
         """Format the question and options exactly as expected by closed-ended VQA models.
@@ -94,6 +96,8 @@ def load_slidebench_vqa_cohort(
                 str(row.get("Task") or row.get("Tumor") or row.get("Organ") or "General")
                 .strip()
             )
+            broad_category = str(row.get("Broad Category", "") or "").strip()
+            narrow_category = str(row.get("Narrow Category", "") or "").strip()
             question = str(row.get("Question", "")).strip()
             options: Dict[str, str] = {}
             for opt_key in ("A", "B", "C", "D"):
@@ -164,6 +168,8 @@ def load_slidebench_vqa_cohort(
                     answer_text=answer_text,
                     feature_path=feature_path,
                     wsi_path=wsi_path,
+                    broad_category=broad_category,
+                    narrow_category=narrow_category,
                 )
             )
 
@@ -291,5 +297,5 @@ def load_patch_features_csv(feature_csv_path: Path, max_patches: int = 38400) ->
     if total_rows >= max_patches:
         indices = np.linspace(0, total_rows - 1, max_patches, dtype=int)
         df = df.iloc[indices].iloc[:max_patches]
-    arr = df.to_numpy(dtype=np.float32).reshape(1, df.shape[0], 512)
+    arr = df.to_numpy(dtype=np.float32, copy=True).reshape(1, df.shape[0], 512)
     return torch.from_numpy(arr)

@@ -189,33 +189,39 @@ class WSIReader:
         wsi_path = self.wsi_path
         if size <= 512 and all((x % 4096) + size <= 4096 and (y % 4096) + size <= 4096 for x, y in coords):
             unique_blocks = sorted({((x // 4096) * 4096, (y // 4096) * 4096) for x, y in coords})
+            if len(coords) >= len(unique_blocks) * 32:
+                def _read_block_4k(bxy: Tuple[int, int]) -> Tuple[Tuple[int, int], np.ndarray]:
+                    bx, by = bxy
+                    with WSIReader(wsi_path) as r:
+                        return bxy, r._read_openslide_rgba_to_rgb(bx, by, 0, 4096, 4096)
 
-            def _read_block_4k(bxy: Tuple[int, int]) -> Tuple[Tuple[int, int], np.ndarray]:
-                bx, by = bxy
-                with WSIReader(wsi_path) as r:
-                    return bxy, r._read_openslide_rgba_to_rgb(bx, by, 0, 4096, 4096)
+                workers = min(num_workers, max(1, len(unique_blocks)))
+                with ThreadPoolExecutor(max_workers=workers) as ex:
+                    block_map = dict(ex.map(_read_block_4k, unique_blocks))
 
-            workers = min(num_workers, max(1, len(unique_blocks)))
-            with ThreadPoolExecutor(max_workers=workers) as ex:
-                block_map = dict(ex.map(_read_block_4k, unique_blocks))
-
-            crops: List[Image.Image] = []
-            for x, y in coords:
-                bx, by = (x // 4096) * 4096, (y // 4096) * 4096
-                ox, oy = x - bx, y - by
-                sub = block_map[(bx, by)][oy : oy + size, ox : ox + size]
-                crops.append(Image.fromarray(sub, mode="RGB"))
-            return crops
-
-        def _read_single(xy: Tuple[int, int]) -> Image.Image:
-            x, y = xy
-            with WSIReader(wsi_path) as r:
-                rgb = r._read_openslide_rgba_to_rgb(x, y, 0, size, size)
-                return Image.fromarray(rgb, mode="RGB")
+                crops: List[Image.Image] = []
+                for x, y in coords:
+                    bx, by = (x // 4096) * 4096, (y // 4096) * 4096
+                    ox, oy = x - bx, y - by
+                    sub = block_map[(bx, by)][oy : oy + size, ox : ox + size]
+                    crops.append(Image.fromarray(sub, mode="RGB"))
+                return crops
 
         workers = min(num_workers, max(1, len(coords)))
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            return list(ex.map(_read_single, coords))
+        chunk_size = max(1, (len(coords) + workers - 1) // workers)
+        chunks = [coords[i : i + chunk_size] for i in range(0, len(coords), chunk_size)]
+
+        def _read_chunk(chunk: List[Tuple[int, int]]) -> List[Image.Image]:
+            out: List[Image.Image] = []
+            with WSIReader(wsi_path) as r:
+                for x, y in chunk:
+                    rgb = r._read_openslide_rgba_to_rgb(x, y, 0, size, size)
+                    out.append(Image.fromarray(rgb, mode="RGB"))
+            return out
+
+        with ThreadPoolExecutor(max_workers=len(chunks)) as ex:
+            nested = list(ex.map(_read_chunk, chunks))
+        return [img for sublist in nested for img in sublist]
 
 
 def wsi_cache_stem(wsi_path: Path, cohort: str) -> str:

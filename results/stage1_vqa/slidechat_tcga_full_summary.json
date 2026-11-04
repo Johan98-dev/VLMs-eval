@@ -1,0 +1,279 @@
+{
+  "run_name": "slidechat_tcga_full",
+  "timestamp_utc": "2026-11-04T21:47:35.988237+00:00",
+  "seed": 42,
+  "cohorts": [
+    "TCGA"
+  ],
+  "limit": 0,
+  "model_metadata": {
+    "model_name": "SlideChat",
+    "checkpoint_path": "/media/adalab/bodega/JohanAlbarracin/Models/SlideChat",
+    "base_llm_path": "/media/adalab/bodega/JohanAlbarracin/Models/Qwen2.5-7B-Instruct",
+    "device": "cuda:0",
+    "dtype": "torch.bfloat16",
+    "max_patches": 12288
+  },
+  "metrics": {
+    "total_samples": 345,
+    "correct_samples": 265,
+    "unparsed_samples": 0,
+    "overall_accuracy": 0.7681,
+    "by_question_type": {
+      "multiple_choice": {
+        "correct": 265,
+        "total": 345,
+        "accuracy": 0.7681
+      }
+    },
+    "by_task": {
+      "ACC": {
+        "correct": 5,
+        "total": 8,
+        "accuracy": 0.625
+      },
+      "BLCA": {
+        "correct": 8,
+        "total": 9,
+        "accuracy": 0.8889
+      },
+      "BRCA": {
+        "correct": 6,
+        "total": 12,
+        "accuracy": 0.5
+      },
+      "CESC": {
+        "correct": 11,
+        "total": 15,
+        "accuracy": 0.7333
+      },
+      "CHOL": {
+        "correct": 10,
+        "total": 15,
+        "accuracy": 0.6667
+      },
+      "COAD": {
+        "correct": 13,
+        "total": 15,
+        "accuracy": 0.8667
+      },
+      "DLBC": {
+        "correct": 6,
+        "total": 6,
+        "accuracy": 1.0
+      },
+      "ESCA": {
+        "correct": 7,
+        "total": 12,
+        "accuracy": 0.5833
+      },
+      "GBM": {
+        "correct": 4,
+        "total": 5,
+        "accuracy": 0.8
+      },
+      "HNSC": {
+        "correct": 7,
+        "total": 10,
+        "accuracy": 0.7
+      },
+      "KICH": {
+        "correct": 6,
+        "total": 8,
+        "accuracy": 0.75
+      },
+      "KIRC": {
+        "correct": 8,
+        "total": 10,
+        "accuracy": 0.8
+      },
+      "KIRP": {
+        "correct": 4,
+        "total": 10,
+        "accuracy": 0.4
+      },
+      "LGG": {
+        "correct": 10,
+        "total": 12,
+        "accuracy": 0.8333
+      },
+      "LIHC": {
+        "correct": 8,
+        "total": 15,
+        "accuracy": 0.5333
+      },
+      "LUAD": {
+        "correct": 10,
+        "total": 11,
+        "accuracy": 0.9091
+      },
+      "LUSC": {
+        "correct": 7,
+        "total": 11,
+        "accuracy": 0.6364
+      },
+      "MESO": {
+        "correct": 9,
+        "total": 9,
+        "accuracy": 1.0
+      },
+      "OV": {
+        "correct": 7,
+        "total": 8,
+        "accuracy": 0.875
+      },
+      "PAAD": {
+        "correct": 8,
+        "total": 11,
+        "accuracy": 0.7273
+      },
+      "PCPG": {
+        "correct": 6,
+        "total": 8,
+        "accuracy": 0.75
+      },
+      "PRAD": {
+        "correct": 9,
+        "total": 13,
+        "accuracy": 0.6923
+      },
+      "READ": {
+        "correct": 12,
+        "total": 13,
+        "accuracy": 0.9231
+      },
+      "SARC": {
+        "correct": 9,
+        "total": 11,
+        "accuracy": 0.8182
+      },
+      "SKCM": {
+        "correct": 11,
+        "total": 12,
+        "accuracy": 0.9167
+      },
+      "STAD": {
+        "correct": 6,
+        "total": 10,
+        "accuracy": 0.6
+      },
+      "TCGT": {
+        "correct": 9,
+        "total": 11,
+        "accuracy": 0.8182
+      },
+      "THCA": {
+        "correct": 7,
+        "total": 8,
+        "accuracy": 0.875
+      },
+      "THYM": {
+        "correct": 17,
+        "total": 19,
+        "accuracy": 0.8947
+      },
+      "UCEC": {
+        "correct": 13,
+        "total": 15,
+        "accuracy": 0.8667
+      },
+      "UCS": {
+        "correct": 12,
+        "total": 13,
+        "accuracy": 0.9231
+      }
+    },
+    "by_cohort": {
+      "TCGA": {
+        "correct": 265,
+        "total": 345,
+        "accuracy": 0.7681
+      }
+    },
+    "by_broad_category": {
+      "Microscopy": {
+        "correct": 87,
+        "total": 110,
+        "accuracy": 0.7909
+      },
+      "Diagnosis": {
+        "correct": 168,
+        "total": 222,
+        "accuracy": 0.7568
+      },
+      "Clinical": {
+        "correct": 10,
+        "total": 13,
+        "accuracy": 0.7692
+      }
+    },
+    "by_narrow_category": {
+      "Tissue Architecture and Arrangement": {
+        "correct": 35,
+        "total": 43,
+        "accuracy": 0.814
+      },
+      "Staging": {
+        "correct": 23,
+        "total": 36,
+        "accuracy": 0.6389
+      },
+      "Grading": {
+        "correct": 42,
+        "total": 67,
+        "accuracy": 0.6269
+      },
+      "Cytomorphological Characteristics": {
+        "correct": 9,
+        "total": 10,
+        "accuracy": 0.9
+      },
+      "Disease Classification": {
+        "correct": 88,
+        "total": 102,
+        "accuracy": 0.8627
+      },
+      "Histopathological Changes": {
+        "correct": 30,
+        "total": 38,
+        "accuracy": 0.7895
+      },
+      "Tumor Characteristics": {
+        "correct": 13,
+        "total": 19,
+        "accuracy": 0.6842
+      },
+      "Biomarker Analysis": {
+        "correct": 3,
+        "total": 5,
+        "accuracy": 0.6
+      },
+      "Disease Detection": {
+        "correct": 2,
+        "total": 3,
+        "accuracy": 0.6667
+      },
+      "Differential Diagnosis": {
+        "correct": 13,
+        "total": 14,
+        "accuracy": 0.9286
+      },
+      "Risk Factors": {
+        "correct": 1,
+        "total": 2,
+        "accuracy": 0.5
+      },
+      "Treatment Guidance": {
+        "correct": 5,
+        "total": 5,
+        "accuracy": 1.0
+      },
+      "Prognostic Assessment": {
+        "correct": 1,
+        "total": 1,
+        "accuracy": 1.0
+      }
+    }
+  },
+  "predictions_file": "/media/adalab/bodega/JohanAlbarracin/VLMs-eval/results/stage1_vqa/slidechat_tcga_full_predictions.jsonl"
+}

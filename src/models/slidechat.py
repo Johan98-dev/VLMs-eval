@@ -263,6 +263,10 @@ class SlideChatAdapter(BaseWSIVLM):
         self.paths = paths or ProjectPaths()
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.dtype = dtype
+        if self.device.type == "cuda":
+            total_vram_gb = torch.cuda.get_device_properties(self.device).total_memory / (1024 ** 3)
+            if total_vram_gb <= 26.0 and max_patches > 12288:
+                max_patches = 12288
         self.max_patches = max_patches
 
         self.tokenizer: Optional[Any] = None
@@ -270,7 +274,8 @@ class SlideChatAdapter(BaseWSIVLM):
         self.longnet_encoder: Optional[SlideChatLongNetEncoder] = None
         self.projector: Optional[SlideChatProjector] = None
         self._conch_extractor: Optional[SlideChatConchFeatureExtractor] = None
-        self._feature_cache: Dict[str, torch.Tensor] = {}
+        self._last_cache_key: Optional[str] = None
+        self._last_pixel_values: Optional[torch.Tensor] = None
 
     def load(self) -> None:
         """Load Qwen2.5-7B-Instruct and apply SlideChat Stage-2 weights (LLM + LongNet + Projector)."""
@@ -371,9 +376,13 @@ class SlideChatAdapter(BaseWSIVLM):
         )
 
         cache_key = f"{sample.cohort}:{sample.slide_id}"
-        if cache_key in self._feature_cache:
-            pixel_values = self._feature_cache[cache_key]
+        if self._last_cache_key == cache_key and self._last_pixel_values is not None:
+            pixel_values = self._last_pixel_values
         else:
+            self._last_pixel_values = None
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+
             feat_path = sample.feature_path
             if feat_path is None or not feat_path.exists():
                 if sample.wsi_path is None or not sample.wsi_path.is_file():
@@ -399,7 +408,9 @@ class SlideChatAdapter(BaseWSIVLM):
                 src_tokens=None, token_embeddings=patch_feats.permute(1, 0, 2)
             )["encoder_out"].permute(1, 0, 2)
             pixel_values = self.projector(encoded)
-            self._feature_cache[cache_key] = pixel_values
+            del patch_feats, encoded
+            self._last_cache_key = cache_key
+            self._last_pixel_values = pixel_values
 
         prompt_text = sample.format_closed_prompt()
         mm_inputs = self._prepare_multimodal_inputs(prompt_text, pixel_values)

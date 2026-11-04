@@ -18,5 +18,11 @@ Histai,Overall,multiple_choice,769,546,71.00,401,52.15,278,36.15
 Histai,Breast,multiple_choice,429,305,71.10,233,54.31,122,28.44
 Histai,Skin,multiple_choice,190,140,73.68,93,48.95,46,24.21
 Histai,Colorectum,multiple_choice,150,101,67.33,75,50.00,110,73.33
+TCGA,Overall (31 Tumors WSI Subset),multiple_choice,345,265,76.81,197,57.10,230,66.67
+TCGA,Microscopy,multiple_choice,110,87,79.09,60,54.55,78,70.91
+TCGA,Diagnosis,multiple_choice,222,168,75.68,129,58.11,142,63.96
+TCGA,Clinical,multiple_choice,13,10,76.92,8,61.54,10,76.92
 ALL_STAGE1,Weighted Overall (BCNB+CPTAC+Histai),all,8283,4600,55.54,3561,42.99,3802,45.90
-ALL_STAGE1,Macro Cohort Average,all,8283,-,58.50,-,49.73,-,35.85
+ALL_STAGE1,Macro Cohort Average (BCNB+CPTAC+Histai),all,8283,-,58.50,-,49.73,-,35.85
+ALL_STAGE1,Weighted Overall (BCNB+CPTAC+Histai+TCGA),all,8628,4865,56.39,3758,43.56,4032,46.73
+ALL_STAGE1,Macro Cohort Average (All 4 Cohorts),all,8628,-,63.08,-,51.57,-,43.56

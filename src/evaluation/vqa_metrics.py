@@ -93,6 +93,8 @@ def compute_vqa_metrics(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     by_qtype: Dict[str, Dict[str, Any]] = {}
     by_task: Dict[str, Dict[str, Any]] = {}
     by_cohort: Dict[str, Dict[str, Any]] = {}
+    by_broad_cat: Dict[str, Dict[str, Any]] = {}
+    by_narrow_cat: Dict[str, Dict[str, Any]] = {}
 
     for rec in records:
         is_corr = bool(rec.get("is_correct", False))
@@ -106,11 +108,29 @@ def compute_vqa_metrics(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
             if is_corr:
                 entry["correct"] += 1
 
-    for group_dict in (by_qtype, by_task, by_cohort):
+        broad_key = str(rec.get("broad_category", "") or "").strip()
+        if broad_key:
+            b_entry = by_broad_cat.setdefault(
+                broad_key, {"correct": 0, "total": 0, "accuracy": 0.0}
+            )
+            b_entry["total"] += 1
+            if is_corr:
+                b_entry["correct"] += 1
+
+        narrow_key = str(rec.get("narrow_category", "") or "").strip()
+        if narrow_key:
+            n_entry = by_narrow_cat.setdefault(
+                narrow_key, {"correct": 0, "total": 0, "accuracy": 0.0}
+            )
+            n_entry["total"] += 1
+            if is_corr:
+                n_entry["correct"] += 1
+
+    for group_dict in (by_qtype, by_task, by_cohort, by_broad_cat, by_narrow_cat):
         for entry in group_dict.values():
             entry["accuracy"] = round(entry["correct"] / max(1, entry["total"]), 4)
 
-    return {
+    result: Dict[str, Any] = {
         "total_samples": total,
         "correct_samples": correct,
         "unparsed_samples": unparsed,
@@ -119,3 +139,8 @@ def compute_vqa_metrics(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "by_task": by_task,
         "by_cohort": by_cohort,
     }
+    if by_broad_cat:
+        result["by_broad_category"] = by_broad_cat
+    if by_narrow_cat:
+        result["by_narrow_category"] = by_narrow_cat
+    return result

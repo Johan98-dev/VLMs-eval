@@ -82,7 +82,23 @@ def print_evaluation_report(
             f"({stats['accuracy'] * 100:6.2f}%)"
         )
 
-    print("\n--- Accuracy by Clinical Task ---")
+    if metrics.get("by_broad_category"):
+        print("\n--- Accuracy by Broad Category ---")
+        for bcat, stats in metrics.get("by_broad_category", {}).items():
+            print(
+                f"  {bcat:<24}: {stats['correct']:>4}/{stats['total']:<4} "
+                f"({stats['accuracy'] * 100:6.2f}%)"
+            )
+
+    if metrics.get("by_narrow_category"):
+        print("\n--- Accuracy by Narrow Category ---")
+        for ncat, stats in metrics.get("by_narrow_category", {}).items():
+            print(
+                f"  {ncat:<36}: {stats['correct']:>4}/{stats['total']:<4} "
+                f"({stats['accuracy'] * 100:6.2f}%)"
+            )
+
+    print("\n--- Accuracy by Clinical Task / Tumor ---")
     for task_name, stats in metrics.get("by_task", {}).items():
         print(
             f"  {task_name:<24}: {stats['correct']:>3}/{stats['total']:<3} "
@@ -168,6 +184,11 @@ def main() -> int:
         action="store_true",
         help="Overwrite existing checkpoint predictions for this run_name.",
     )
+    parser.add_argument(
+        "--require-wsi",
+        action="store_true",
+        help="Restrict evaluation to samples that have a local WSI file on disk.",
+    )
     args = parser.parse_args()
 
     set_global_seed(args.seed)
@@ -179,7 +200,7 @@ def main() -> int:
             datasets_dir=paths.datasets_dir,
             cohort=cohort,
             require_features=(args.model == "slidechat"),
-            require_wsi=(args.model in ("prism2", "mllm-hwsi")),
+            require_wsi=(args.require_wsi or args.model in ("prism2", "mllm-hwsi")),
         )
         if args.limit > 0:
             cohort_samples = select_stratified_pilot_samples(
@@ -204,6 +225,17 @@ def main() -> int:
 
     if args.overwrite and jsonl_path.exists():
         jsonl_path.unlink()
+
+    target_uids = {s.sample_uid for s in all_samples}
+    if jsonl_path.exists():
+        existing_records = load_jsonl_records(jsonl_path)
+        filtered_existing = [
+            r for r in existing_records if str(r.get("sample_uid")) in target_uids
+        ]
+        if len(filtered_existing) != len(existing_records):
+            jsonl_path.unlink()
+            for rec in filtered_existing:
+                append_jsonl_record(jsonl_path, rec)
 
     completed_uids = load_completed_sample_ids(jsonl_path)
     pending_samples = [s for s in all_samples if s.sample_uid not in completed_uids]
@@ -232,6 +264,8 @@ def main() -> int:
             "row_id": sample.row_id,
             "slide_id": sample.slide_id,
             "task": sample.task,
+            "broad_category": sample.broad_category,
+            "narrow_category": sample.narrow_category,
             "question_type": sample.question_type,
             "question": sample.question,
             "options": sample.options,
