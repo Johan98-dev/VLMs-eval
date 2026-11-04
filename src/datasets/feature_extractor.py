@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 import ctypes
 from functools import partial
 import json
@@ -176,6 +177,53 @@ class WSIReader:
             self._pil_rgb = self._pil_img.convert("RGB")
         return crop_with_padding(self._pil_rgb, x, y, size)
 
+    def crop_many(
+        self, coords: List[Tuple[int, int]], size: int = 256, num_workers: int = 8
+    ) -> List[Image.Image]:
+        """Batch-crop `size x size` RGB patches using 4096x4096 block caching and multithreaded OpenSlide reads."""
+        if not coords:
+            return []
+        if self._osr is None or self._lib is None:
+            return [self.crop(x, y, size) for x, y in coords]
+
+        wsi_path = self.wsi_path
+        if size <= 512 and all((x % 4096) + size <= 4096 and (y % 4096) + size <= 4096 for x, y in coords):
+            unique_blocks = sorted({((x // 4096) * 4096, (y // 4096) * 4096) for x, y in coords})
+
+            def _read_block_4k(bxy: Tuple[int, int]) -> Tuple[Tuple[int, int], np.ndarray]:
+                bx, by = bxy
+                with WSIReader(wsi_path) as r:
+                    return bxy, r._read_openslide_rgba_to_rgb(bx, by, 0, 4096, 4096)
+
+            workers = min(num_workers, max(1, len(unique_blocks)))
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                block_map = dict(ex.map(_read_block_4k, unique_blocks))
+
+            crops: List[Image.Image] = []
+            for x, y in coords:
+                bx, by = (x // 4096) * 4096, (y // 4096) * 4096
+                ox, oy = x - bx, y - by
+                sub = block_map[(bx, by)][oy : oy + size, ox : ox + size]
+                crops.append(Image.fromarray(sub, mode="RGB"))
+            return crops
+
+        def _read_single(xy: Tuple[int, int]) -> Image.Image:
+            x, y = xy
+            with WSIReader(wsi_path) as r:
+                rgb = r._read_openslide_rgba_to_rgb(x, y, 0, size, size)
+                return Image.fromarray(rgb, mode="RGB")
+
+        workers = min(num_workers, max(1, len(coords)))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            return list(ex.map(_read_single, coords))
+
+
+def wsi_cache_stem(wsi_path: Path, cohort: str) -> str:
+    """Return a unique, filesystem-safe cache filename stem for a WSI path."""
+    if cohort == "Histai":
+        return f"{wsi_path.parent.parent.name}_{wsi_path.parent.name}_{wsi_path.stem}"
+    return wsi_path.stem
+
 
 # ---------------------------------------------------------------------------
 # Coordinate discovery from WSI / SlideBench ROI annotations
@@ -300,8 +348,10 @@ def discover_region_coords_4096(
     scored_regions: List[Tuple[float, int, int]] = []
     seen_coords = set()
     reg_thumb = max(1, region_size // scale)
-    for y in range(0, max(1, h), region_size):
-        for x in range(0, max(1, w), region_size):
+    max_y = max(1, h - region_size + 1) if h >= region_size * 2 else max(1, h)
+    max_x = max(1, w - region_size + 1) if w >= region_size * 2 else max(1, w)
+    for y in range(0, max_y, region_size):
+        for x in range(0, max_x, region_size):
             rx = min(x, max(0, w - region_size))
             ry = min(y, max(0, h - region_size))
             if (rx, ry) in seen_coords:
@@ -375,13 +425,15 @@ class Virchow2FeatureExtractor:
         """Return cached Virchow2 .pt path or extract and cache it in ../Datasets/."""
         out_dir = self.paths.datasets_dir / cohort / "Feat" / "PRISM2_Virchow2"
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"{wsi_path.stem}.pt"
+        stem = wsi_cache_stem(wsi_path, cohort)
+        out_path = out_dir / f"{stem}.pt"
         if out_path.is_file():
             return out_path
 
         coords = discover_tissue_patch_coords_256(wsi_path, feature_csv_path=feature_csv_path)
         with WSIReader(wsi_path) as reader:
-            tensors = [self.transform(reader.crop(x, y, 256)) for x, y in coords]
+            crops = reader.crop_many(coords, 256)
+        tensors = [self.transform(img) for img in crops]
 
         cls_chunks: List[torch.Tensor] = []
         use_amp = self.device.type == "cuda"
@@ -393,7 +445,7 @@ class Virchow2FeatureExtractor:
             cls_chunks.append(cls_tok.detach().float().cpu())
 
         tile_embeddings = torch.cat(cls_chunks, dim=0)
-        tmp_path = out_dir / f".{wsi_path.stem}.{os.getpid()}.pt"
+        tmp_path = out_dir / f".{stem}.{os.getpid()}.pt"
         torch.save(tile_embeddings, tmp_path)
         tmp_path.replace(out_path)
         return out_path
@@ -844,7 +896,8 @@ class MLLMHWSIFeatureExtractor:
         """Return cached MLLM-HWSI .pt quadruplet path or extract and cache it in ../Datasets/."""
         out_dir = self.paths.datasets_dir / cohort / "Feat" / "MLLM_HWSI"
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"{wsi_path.stem}.pt"
+        stem = wsi_cache_stem(wsi_path, cohort)
+        out_path = out_dir / f"{stem}.pt"
         if out_path.is_file():
             return out_path
 
@@ -855,33 +908,33 @@ class MLLMHWSIFeatureExtractor:
 
         use_amp = self.device.type == "cuda"
         with WSIReader(wsi_path) as reader:
-            for rx, ry in region_coords:
-                reg_img = reader.crop(rx, ry, 4096)
-                patches_pil: List[Image.Image] = []
-                hipt_tensors: List[torch.Tensor] = []
-                conch_tensors: List[torch.Tensor] = []
-                for gy in range(16):
-                    for gx in range(16):
-                        p = reg_img.crop((gx * 256, gy * 256, (gx + 1) * 256, (gy + 1) * 256))
-                        patches_pil.append(p)
-                        hipt_tensors.append(self.hipt_transform(p))
-                        conch_tensors.append(self.conch.preprocess(p))
-                region_patch_pil.append(patches_pil)
+            reg_imgs = reader.crop_many(region_coords, 4096)
+        for reg_img in reg_imgs:
+            patches_pil: List[Image.Image] = []
+            hipt_tensors: List[torch.Tensor] = []
+            conch_tensors: List[torch.Tensor] = []
+            for gy in range(16):
+                for gx in range(16):
+                    p = reg_img.crop((gx * 256, gy * 256, (gx + 1) * 256, (gy + 1) * 256))
+                    patches_pil.append(p)
+                    hipt_tensors.append(self.hipt_transform(p))
+                    conch_tensors.append(self.conch.preprocess(p))
+            region_patch_pil.append(patches_pil)
 
-                xb_hipt = torch.stack(hipt_tensors, dim=0).to(self.device)
+            xb_hipt = torch.stack(hipt_tensors, dim=0).to(self.device)
+            with torch.amp.autocast(device_type=self.device.type, dtype=torch.float16, enabled=use_amp):
+                feat256 = self.hipt256(xb_hipt)  # (256, 384)
+                feat_grid = feat256.reshape(1, 16, 16, 384).permute(0, 3, 1, 2).contiguous()
+                cls4k = self.hipt4k(feat_grid)   # (1, 192)
+            region_cls_list.append(cls4k.squeeze(0).float().cpu())
+
+            conch_chunks: List[torch.Tensor] = []
+            for b0 in range(0, 256, 64):
+                xb_c = torch.stack(conch_tensors[b0 : b0 + 64], dim=0).to(self.device)
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.float16, enabled=use_amp):
-                    feat256 = self.hipt256(xb_hipt)  # (256, 384)
-                    feat_grid = feat256.reshape(1, 16, 16, 384).permute(0, 3, 1, 2).contiguous()
-                    cls4k = self.hipt4k(feat_grid)   # (1, 192)
-                region_cls_list.append(cls4k.squeeze(0).float().cpu())
-
-                conch_chunks: List[torch.Tensor] = []
-                for b0 in range(0, 256, 64):
-                    xb_c = torch.stack(conch_tensors[b0 : b0 + 64], dim=0).to(self.device)
-                    with torch.amp.autocast(device_type=self.device.type, dtype=torch.float16, enabled=use_amp):
-                        c_out = self.conch.encode_image(xb_c, normalize=False)
-                    conch_chunks.append(c_out.float().cpu())
-                region_conch_list.append(torch.cat(conch_chunks, dim=0))
+                    c_out = self.conch.encode_image(xb_c, normalize=False)
+                conch_chunks.append(c_out.float().cpu())
+            region_conch_list.append(torch.cat(conch_chunks, dim=0))
 
         region_tensor = torch.stack(region_cls_list, dim=0)     # (R, 192)
         wsi_tensor = region_tensor.mean(dim=0)                  # (192,)
@@ -947,7 +1000,7 @@ class MLLMHWSIFeatureExtractor:
             "patch": selected_patch_feats.unsqueeze(0),      # (1, R, 16, 512)
             "cell": cell_tensor.unsqueeze(0),                # (1, R, 16, 384)
         }
-        tmp_path = out_dir / f".{wsi_path.stem}.{os.getpid()}.pt"
+        tmp_path = out_dir / f".{stem}.{os.getpid()}.pt"
         torch.save(payload, tmp_path)
         tmp_path.replace(out_path)
         return out_path
@@ -981,13 +1034,15 @@ class SlideChatConchFeatureExtractor:
         """Return cached SlideChat CONCH .pt path or extract and cache it in ../Datasets/."""
         out_dir = self.paths.datasets_dir / cohort / "Feat" / "SlideChat_CONCH"
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"{wsi_path.stem}.pt"
+        stem = wsi_cache_stem(wsi_path, cohort)
+        out_path = out_dir / f"{stem}.pt"
         if out_path.is_file():
             return out_path
 
         coords = discover_tissue_patch_coords_256(wsi_path, feature_csv_path=feature_csv_path)
         with WSIReader(wsi_path) as reader:
-            tensors = [self.conch.preprocess(reader.crop(x, y, 256)) for x, y in coords]
+            crops = reader.crop_many(coords, 256)
+        tensors = [self.conch.preprocess(img) for img in crops]
 
         feat_chunks: List[torch.Tensor] = []
         use_amp = self.device.type == "cuda"
@@ -1000,7 +1055,7 @@ class SlideChatConchFeatureExtractor:
             feat_chunks.append(feats.detach().float().cpu())
 
         patch_features = torch.cat(feat_chunks, dim=0)  # (N, 512)
-        tmp_path = out_dir / f".{wsi_path.stem}.{os.getpid()}.pt"
+        tmp_path = out_dir / f".{stem}.{os.getpid()}.pt"
         torch.save(patch_features, tmp_path)
         tmp_path.replace(out_path)
         return out_path

@@ -1,0 +1,54 @@
+{
+  "run_name": "prism2_histai_full",
+  "timestamp_utc": "2026-11-04T13:23:40.012376+00:00",
+  "seed": 42,
+  "cohorts": [
+    "Histai"
+  ],
+  "limit": 0,
+  "model_metadata": {
+    "model_name": "prism2",
+    "prism2_dir": "/media/adalab/bodega/JohanAlbarracin/Models/PRISM2",
+    "virchow2_dir": "/media/adalab/bodega/JohanAlbarracin/Models/Encoders/Virchow2",
+    "device": "cuda:0",
+    "dtype": "torch.bfloat16"
+  },
+  "metrics": {
+    "total_samples": 769,
+    "correct_samples": 401,
+    "unparsed_samples": 0,
+    "overall_accuracy": 0.5215,
+    "by_question_type": {
+      "multiple_choice": {
+        "correct": 401,
+        "total": 769,
+        "accuracy": 0.5215
+      }
+    },
+    "by_task": {
+      "Breast": {
+        "correct": 233,
+        "total": 429,
+        "accuracy": 0.5431
+      },
+      "Skin": {
+        "correct": 93,
+        "total": 190,
+        "accuracy": 0.4895
+      },
+      "Colorectum": {
+        "correct": 75,
+        "total": 150,
+        "accuracy": 0.5
+      }
+    },
+    "by_cohort": {
+      "Histai": {
+        "correct": 401,
+        "total": 769,
+        "accuracy": 0.5215
+      }
+    }
+  },
+  "predictions_file": "/media/adalab/bodega/JohanAlbarracin/VLMs-eval/results/stage1_vqa/prism2_histai_full_predictions.jsonl"
+}

@@ -124,6 +124,11 @@ def load_slidebench_vqa_cohort(
                 if cand_wsi.exists():
                     wsi_path = cand_wsi
             elif cohort == "Histai":
+                cand_feat_pt = (
+                    cohort_dir / "Feat" / "SlideChat_CONCH" / f"{slide_id.replace('/', '_')}.pt"
+                )
+                if cand_feat_pt.exists():
+                    feature_path = cand_feat_pt
                 if "/" in slide_id and "_slide_" in slide_id:
                     repo_short, slide_str = slide_id.split("/", 1)
                     case_id, slide_suffix = slide_str.split("_slide_", 1)

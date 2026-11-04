@@ -14,5 +14,9 @@ CPTAC,CM,multiple_choice,60,31,51.67,13,21.67,5,8.33
 CPTAC,LSCC,multiple_choice,60,35,58.33,45,75.00,4,6.67
 CPTAC,LUAD,multiple_choice,60,24,40.00,33,55.00,22,36.67
 CPTAC,UCEC,multiple_choice,60,31,51.67,42,70.00,26,43.33
-ALL_STAGE1,Weighted Overall (BCNB+CPTAC),all,7514,4054,53.95,3160,42.05,3524,46.90
-ALL_STAGE1,Macro Cohort Average,all,7514,-,52.25,-,48.52,-,35.71
+Histai,Overall,multiple_choice,769,546,71.00,401,52.15,278,36.15
+Histai,Breast,multiple_choice,429,305,71.10,233,54.31,122,28.44
+Histai,Skin,multiple_choice,190,140,73.68,93,48.95,46,24.21
+Histai,Colorectum,multiple_choice,150,101,67.33,75,50.00,110,73.33
+ALL_STAGE1,Weighted Overall (BCNB+CPTAC+Histai),all,8283,4600,55.54,3561,42.99,3802,45.90
+ALL_STAGE1,Macro Cohort Average,all,8283,-,58.50,-,49.73,-,35.85

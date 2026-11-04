@@ -314,7 +314,7 @@ class MLLMHWSIAdapter(BaseWSIVLM):
             / sample.cohort
             / "Feat"
             / "MLLM_HWSI"
-            / f"{sample.slide_id}.pt"
+            / f"{sample.slide_id.replace('/', '_')}.pt"
         )
         if not pt_path.is_file():
             if sample.wsi_path is None or not sample.wsi_path.is_file():

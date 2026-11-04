@@ -195,7 +195,7 @@ class PRISM2Adapter(BaseWSIVLM):
             / sample.cohort
             / "Feat"
             / "PRISM2_Virchow2"
-            / f"{sample.slide_id}.pt"
+            / f"{sample.slide_id.replace('/', '_')}.pt"
         )
         if not pt_path.is_file():
             if sample.wsi_path is None or not sample.wsi_path.is_file():
