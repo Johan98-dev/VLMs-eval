@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
 """
-SlideBench Non-TCGA Dataset & WSI Downloader (BCNB, CPTAC, Histai).
+SlideBench Dataset & WSI Downloader (BCNB, CPTAC, Histai, TCGA).
 
 Organizes CSV benchmarks, pre-extracted features, and Whole-Slide Images (WSIs)
-into ../Datasets/SlideBench/{BCNB,CPTAC,Histai}.
+into ../Datasets/SlideBench/{BCNB,CPTAC,Histai,TCGA}.
 """
 
 import argparse
 import ast
 import csv
+import io
+import json
 import os
 import shutil
 import sys
+import tarfile
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Dict, Iterator, List, Optional, Set, Tuple
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_DATASET_DIR = PROJECT_ROOT.parent / "Datasets" / "SlideBench"
@@ -25,7 +28,7 @@ os.environ.setdefault("HF_XET_CACHE", str(DEFAULT_DATASET_DIR / ".hf_cache" / "x
 
 import requests
 from dotenv import load_dotenv
-from huggingface_hub import hf_hub_download, list_repo_files
+from huggingface_hub import hf_hub_download, hf_hub_url, list_repo_files
 from tqdm import tqdm
 
 SLIDECHAT_REPO = "General-Medical-AI/SlideChat"
@@ -33,11 +36,14 @@ BCNB_WSI_REPO = "Anonymous192234/BCNB"
 TCIA_CPTAC_BASE_URL = (
     "https://pathdb.cancerimagingarchive.net/system/files/wsi/ross/CPTAC"
 )
+GDC_FILES_API_URL = "https://api.gdc.cancer.gov/files"
+GDC_DATA_API_URL = "https://api.gdc.cancer.gov/data"
 
 SLIDEBENCH_CSVS = {
     "BCNB": ["SlideBench-VQA-BCNB.csv"],
     "CPTAC": ["SlideBench-Caption-CPTAC.csv", "SlideBench-VQA-CPTAC.csv"],
     "Histai": ["SlideBench-Caption-Histai.csv", "SlideBench-VQA-Histai.csv"],
+    "TCGA": ["SlideBench-Caption-TCGA.csv", "SlideBench-VQA-TCGA.csv"],
 }
 
 
@@ -56,6 +62,9 @@ def setup_directories(base_dir: Path) -> Dict[str, Path]:
         "CPTAC_WSI": base_dir / "CPTAC" / "WSI",
         "Histai": base_dir / "Histai",
         "Histai_WSI": base_dir / "Histai" / "WSI",
+        "TCGA": base_dir / "TCGA",
+        "TCGA_WSI": base_dir / "TCGA" / "WSI",
+        "TCGA_FEAT": base_dir / "TCGA" / "Feat" / "TCGA_patch_feat",
         "HF_CACHE": hf_cache,
     }
     for path in dirs.values():
@@ -398,10 +407,326 @@ def download_bcnb_wsis(
         shutil.rmtree(tmp_zip_dir, ignore_errors=True)
 
 
-def verify_dataset(base_dir: Path) -> None:
-    """Phase 6: Verify CSV benchmarks and downloaded WSI counts."""
+def parse_tcga_slides(tcga_dir: Path, vqa_only: bool = False) -> List[Tuple[str, str]]:
+    """
+    Extract unique (Tumor, Slide_ID) pairs from TCGA CSVs in round-robin tumor order,
+    prioritizing SlideBench-VQA-TCGA.csv slides first so stratified validation across all
+    31 tumor cohorts is ready immediately.
+    """
+    csv_list = (
+        ["SlideBench-VQA-TCGA.csv"]
+        if vqa_only
+        else ["SlideBench-VQA-TCGA.csv", "SlideBench-Caption-TCGA.csv"]
+    )
+    by_tumor: Dict[str, List[str]] = {}
+    seen: Set[Tuple[str, str]] = set()
+    for csv_name in csv_list:
+        csv_path = tcga_dir / csv_name
+        if not csv_path.exists():
+            raise FileNotFoundError(
+                f"Missing {csv_path}. Run `--phase annotations` first."
+            )
+        with csv_path.open("r", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                tumor = row["Tumor"].strip()
+                slide = row["Slide"].strip()
+                if tumor and slide and (tumor, slide) not in seen:
+                    seen.add((tumor, slide))
+                    by_tumor.setdefault(tumor, []).append(slide)
+
+    tumors = sorted(by_tumor.keys())
+    ordered: List[Tuple[str, str]] = []
+    idx = 0
+    while True:
+        added = False
+        for t in tumors:
+            if idx < len(by_tumor[t]):
+                ordered.append((t, by_tumor[t][idx]))
+                added = True
+        if not added:
+            break
+        idx += 1
+    return ordered
+
+
+def fetch_or_load_tcga_gdc_manifest(
+    tcga_dir: Path, slides: List[Tuple[str, str]]
+) -> Dict[str, Dict[str, object]]:
+    """Query NCI GDC API for slide file_ids and cache the manifest to disk."""
+    manifest_path = tcga_dir / "gdc_wsi_manifest.json"
+    manifest: Dict[str, Dict[str, object]] = {}
+    if manifest_path.exists():
+        try:
+            with manifest_path.open("r", encoding="utf-8") as f:
+                manifest = json.load(f)
+        except Exception:
+            manifest = {}
+
+    missing_slides = sorted({s for _, s in slides if s not in manifest})
+    if not missing_slides:
+        return manifest
+
+    print(f"[TCGA] Querying NCI GDC API for {len(missing_slides)} slide IDs...")
+    filters = {
+        "op": "and",
+        "content": [
+            {"op": "=", "content": {"field": "data_type", "value": "Slide Image"}},
+            {
+                "op": "in",
+                "content": {
+                    "field": "cases.samples.portions.slides.submitter_id",
+                    "value": missing_slides,
+                },
+            },
+        ],
+    }
+    payload = {
+        "filters": filters,
+        "fields": "file_id,file_name,submitter_id,file_size,access,cases.samples.portions.slides.submitter_id",
+        "size": max(2000, len(missing_slides) + 100),
+    }
+    r = requests.post(GDC_FILES_API_URL, json=payload, timeout=90)
+    r.raise_for_status()
+    hits = r.json().get("data", {}).get("hits", [])
+
+    missing_set = set(missing_slides)
+    for hit in hits:
+        matched_sub_ids: Set[str] = set()
+        for case in hit.get("cases", []):
+            for samp in case.get("samples", []):
+                for port in samp.get("portions", []):
+                    for sl in port.get("slides", []):
+                        sub_id = sl.get("submitter_id", "")
+                        if sub_id in missing_set:
+                            matched_sub_ids.add(sub_id)
+        if not matched_sub_ids:
+            fname_prefix = hit.get("file_name", "").split(".")[0]
+            if fname_prefix in missing_set:
+                matched_sub_ids.add(fname_prefix)
+
+        for sub_id in matched_sub_ids:
+            manifest[sub_id] = {
+                "file_id": hit["file_id"],
+                "file_name": hit.get("file_name", ""),
+                "file_size": hit.get("file_size", 0),
+                "access": hit.get("access", "open"),
+            }
+
+    with manifest_path.open("w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, sort_keys=True)
+    return manifest
+
+
+def download_tcga_wsis(
+    base_dir: Path, max_workers: int = 6, limit: int = 0, vqa_only: bool = True
+) -> None:
+    """Download TCGA .svs WSIs from NCI GDC API in stratified round-robin tumor order."""
     dirs = setup_directories(base_dir)
-    print("=== SlideBench Non-TCGA Verification Summary ===")
+    slides = parse_tcga_slides(dirs["TCGA"], vqa_only=vqa_only)
+    manifest = fetch_or_load_tcga_gdc_manifest(dirs["TCGA"], slides)
+    if limit > 0:
+        slides = slides[:limit]
+
+    print(f"=== Downloading TCGA WSIs from NCI GDC ({len(slides)} unique slides) ===")
+    failures = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {}
+        for tumor, slide_id in slides:
+            info = manifest.get(slide_id)
+            if not info:
+                failures.append(f"Missing GDC file_id for {tumor}/{slide_id}")
+                continue
+            file_id = info["file_id"]
+            url = f"{GDC_DATA_API_URL}/{file_id}"
+            dest = dirs["TCGA_WSI"] / tumor / f"{slide_id}.svs"
+            futures[executor.submit(_download_http_file, url, dest, 300, 4)] = (
+                tumor,
+                slide_id,
+            )
+
+        for future in tqdm(
+            as_completed(futures), total=len(futures), desc="TCGA WSIs"
+        ):
+            ok, msg = future.result()
+            if not ok:
+                failures.append(msg)
+
+    if failures:
+        print(f"Completed with {len(failures)} failed downloads:")
+        for err in failures[:20]:
+            print(f"  - {err}")
+    else:
+        print("All requested TCGA WSIs downloaded successfully.")
+
+
+class _MultiPartHttpReader(io.RawIOBase):
+    """Sequential file-like HTTP stream across multiple `.tar.gz.part-*` URLs."""
+
+    def __init__(self, urls: List[str], token: Optional[str] = None) -> None:
+        super().__init__()
+        self.urls = urls
+        self.headers = {"Authorization": f"Bearer {token}"} if token else {}
+        self.part_idx = 0
+        self._resp: Optional[requests.Response] = None
+        self._iter: Optional[Iterator[bytes]] = None
+        self._buf = bytearray()
+
+    def readable(self) -> bool:
+        return True
+
+    def _open_next_part(self) -> bool:
+        if self._resp is not None:
+            self._resp.close()
+            self._resp = None
+        if self.part_idx >= len(self.urls):
+            return False
+        url = self.urls[self.part_idx]
+        self.part_idx += 1
+        self._resp = requests.get(
+            url, headers=self.headers, stream=True, timeout=180
+        )
+        self._resp.raise_for_status()
+        self._iter = self._resp.iter_content(chunk_size=1024 * 1024)
+        return True
+
+    def readinto(self, b: bytearray | memoryview) -> int:
+        target_len = len(b)
+        while len(self._buf) < target_len:
+            if self._iter is None:
+                if not self._open_next_part():
+                    break
+            try:
+                assert self._iter is not None
+                chunk = next(self._iter)
+                if chunk:
+                    self._buf.extend(chunk)
+            except StopIteration:
+                self._iter = None
+        n = min(target_len, len(self._buf))
+        b[:n] = self._buf[:n]
+        del self._buf[:n]
+        return n
+
+    def close(self) -> None:
+        if self._resp is not None:
+            self._resp.close()
+            self._resp = None
+        super().close()
+
+
+def _extract_tcga_tumor_features(
+    tumor: str,
+    part_files: List[str],
+    target_slides: Set[str],
+    tcga_feat_dir: Path,
+    token: Optional[str],
+) -> Tuple[str, int, Optional[str]]:
+    """Stream-extract only the target SlideBench `.csv` files for a single TCGA tumor."""
+    tumor_out_dir = tcga_feat_dir / tumor
+    tumor_out_dir.mkdir(parents=True, exist_ok=True)
+    remaining = {
+        s
+        for s in target_slides
+        if not (tumor_out_dir / f"{s}.csv").exists()
+        or (tumor_out_dir / f"{s}.csv").stat().st_size == 0
+    }
+    if not remaining:
+        return tumor, len(target_slides), None
+
+    urls = [
+        hf_hub_url(repo_id=SLIDECHAT_REPO, filename=pf, repo_type="dataset")
+        for pf in sorted(part_files)
+    ]
+    extracted_count = len(target_slides) - len(remaining)
+    reader = _MultiPartHttpReader(urls, token=token)
+    try:
+        with tarfile.open(fileobj=reader, mode="r|gz") as tf:
+            for member in tf:
+                if not member.isfile() or not member.name.endswith(".csv"):
+                    continue
+                slide_stem = Path(member.name).stem
+                if slide_stem not in remaining:
+                    continue
+                src = tf.extractfile(member)
+                if src is None:
+                    continue
+                dest = tumor_out_dir / f"{slide_stem}.csv"
+                tmp_dest = tumor_out_dir / f".{slide_stem}.csv.part"
+                with tmp_dest.open("wb") as dst:
+                    shutil.copyfileobj(src, dst, length=1024 * 1024)
+                tmp_dest.replace(dest)
+                remaining.remove(slide_stem)
+                extracted_count += 1
+                if not remaining:
+                    break
+        return tumor, extracted_count, None
+    except Exception as exc:
+        return tumor, extracted_count, str(exc)
+    finally:
+        reader.close()
+
+
+def download_tcga_features(
+    base_dir: Path, max_workers: int = 3, vqa_only: bool = False
+) -> None:
+    """Stream-extract SlideBench TCGA CONCH patch features from Hugging Face."""
+    dirs = setup_directories(base_dir)
+    slides = parse_tcga_slides(dirs["TCGA"], vqa_only=vqa_only)
+    slides_by_tumor: Dict[str, Set[str]] = {}
+    for tumor, slide_id in slides:
+        slides_by_tumor.setdefault(tumor, set()).add(slide_id)
+
+    token = os.getenv("HF_TOKEN")
+    repo_files = list_repo_files(SLIDECHAT_REPO, repo_type="dataset", token=token)
+    parts_by_tumor: Dict[str, List[str]] = {}
+    for rf in repo_files:
+        if rf.startswith("Feat/TCGA_patch_feat/") and ".tar.gz.part-" in rf:
+            parts = rf.split("/")
+            if len(parts) >= 4:
+                t_name = parts[2]
+                parts_by_tumor.setdefault(t_name, []).append(rf)
+
+    tumors = sorted(slides_by_tumor.keys())
+    print(
+        f"=== Streaming & Extracting TCGA Patch Features ({len(slides)} slides across {len(tumors)} tumors) ==="
+    )
+    failures = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(
+                _extract_tcga_tumor_features,
+                tumor,
+                parts_by_tumor.get(tumor, []),
+                slides_by_tumor[tumor],
+                dirs["TCGA_FEAT"],
+                token,
+            ): tumor
+            for tumor in tumors
+            if parts_by_tumor.get(tumor)
+        }
+        for future in tqdm(
+            as_completed(futures), total=len(futures), desc="TCGA Tumor Feats"
+        ):
+            tumor, count, err = future.result()
+            expected = len(slides_by_tumor[tumor])
+            if err:
+                failures.append(f"{tumor} ({count}/{expected}): {err}")
+            else:
+                tqdm.write(f"  [TCGA Feat] {tumor}: {count}/{expected} slides ready")
+
+    if failures:
+        print(f"Completed with {len(failures)} partial/failed tumor streams:")
+        for f_err in failures:
+            print(f"  - {f_err}")
+    else:
+        print("All requested TCGA patch features extracted successfully.")
+
+
+def verify_dataset(base_dir: Path) -> None:
+    """Phase 6: Verify CSV benchmarks and downloaded WSI/feature counts."""
+    dirs = setup_directories(base_dir)
+    print("=== SlideBench Dataset Verification Summary ===")
 
     for cohort, csv_list in SLIDEBENCH_CSVS.items():
         for csv_name in csv_list:
@@ -445,15 +770,50 @@ def verify_dataset(base_dir: Path) -> None:
     ]
     print(f"  [BCNB WSIs] {len(bcnb_wsi_files)} extracted files in {dirs['BCNB_WSI']}")
 
+    if (dirs["TCGA"] / "SlideBench-VQA-TCGA.csv").exists():
+        tcga_vqa_expected = parse_tcga_slides(dirs["TCGA"], vqa_only=True)
+        tcga_all_expected = parse_tcga_slides(dirs["TCGA"], vqa_only=False)
+        tcga_feat_vqa = sum(
+            1
+            for tumor, slide_id in tcga_vqa_expected
+            if (dirs["TCGA_FEAT"] / tumor / f"{slide_id}.csv").exists()
+        )
+        tcga_wsi_vqa = sum(
+            1
+            for tumor, slide_id in tcga_vqa_expected
+            if (dirs["TCGA_WSI"] / tumor / f"{slide_id}.svs").exists()
+        )
+        tcga_wsi_all = sum(
+            1
+            for tumor, slide_id in tcga_all_expected
+            if (dirs["TCGA_WSI"] / tumor / f"{slide_id}.svs").exists()
+        )
+        print(
+            f"  [TCGA Patch Feats (VQA)] {tcga_feat_vqa} / {len(tcga_vqa_expected)} .csv files present"
+        )
+        print(
+            f"  [TCGA WSIs (VQA / All)] {tcga_wsi_vqa} / {len(tcga_vqa_expected)} VQA .svs "
+            f"({tcga_wsi_all} / {len(tcga_all_expected)} total .svs) present"
+        )
+
 
 def main() -> int:
     load_dotenv(PROJECT_ROOT / ".env")
     parser = argparse.ArgumentParser(
-        description="Download and organize SlideBench non-TCGA cohorts (BCNB, CPTAC, Histai)."
+        description="Download and organize SlideBench cohorts (BCNB, CPTAC, Histai, TCGA)."
     )
     parser.add_argument(
         "--phase",
-        choices=["annotations", "cptac", "histai", "bcnb", "verify", "all"],
+        choices=[
+            "annotations",
+            "cptac",
+            "histai",
+            "bcnb",
+            "tcga",
+            "tcga-feat",
+            "verify",
+            "all",
+        ],
         required=True,
         help="Execution phase to run.",
     )
@@ -492,6 +852,10 @@ def main() -> int:
         download_histai_wsis(args.dataset_dir, max_workers=args.workers, limit=args.limit)
     if args.phase in ("bcnb", "all"):
         download_bcnb_wsis(args.dataset_dir, limit=args.limit)
+    if args.phase in ("tcga-feat", "all"):
+        download_tcga_features(args.dataset_dir, max_workers=args.workers)
+    if args.phase in ("tcga", "all"):
+        download_tcga_wsis(args.dataset_dir, max_workers=args.workers, limit=args.limit)
     if args.phase in ("verify", "all"):
         verify_dataset(args.dataset_dir)
 

@@ -2,9 +2,9 @@
 
 Evaluation toolkit and dataset management utilities for Vision-Language Models (VLMs) in computational pathology.
 
-## SlideBench Non-TCGA Dataset Setup
+## SlideBench Dataset Setup
 
-This repository provides [`download_slidebench.py`](./download_slidebench.py) to download, extract, and organize the non-TCGA evaluation benchmarks (`BCNB`, `CPTAC`, and `Histai`) from [**General-Medical-AI/SlideChat**](https://huggingface.co/datasets/General-Medical-AI/SlideChat) along with their corresponding Whole-Slide Images (WSIs).
+This repository provides [`download_slidebench.py`](./download_slidebench.py) to download, extract, and organize the SlideBench evaluation benchmarks (`BCNB`, `CPTAC`, `Histai`, and `TCGA`) from [**General-Medical-AI/SlideChat**](https://huggingface.co/datasets/General-Medical-AI/SlideChat) along with their corresponding Whole-Slide Images (WSIs).
 
 ### Target Directory Structure
 
@@ -26,14 +26,20 @@ By default, all dataset files are organized under `../Datasets/SlideBench`:
 │       ├── LSCC/
 │       ├── LUAD/
 │       └── UCEC/
-└── Histai/
-    ├── SlideBench-Caption-Histai.csv    # Caption/Report benchmark (1,145 samples: Breast, Colorectum, Skin)
-    ├── SlideBench-VQA-Histai.csv        # VQA benchmark (769 samples: Breast, Colorectum, Skin)
-    └── WSI/                             # 2,217 unique .tiff slides organized by sub-cohort and case
-        ├── HISTAI-breast/
-        ├── HISTAI-colorectal-b1/
-        ├── HISTAI-colorectal-b2/
-        └── HISTAI-skin-b1/
+├── Histai/
+│   ├── SlideBench-Caption-Histai.csv    # Caption/Report benchmark (1,145 samples: Breast, Colorectum, Skin)
+│   ├── SlideBench-VQA-Histai.csv        # VQA benchmark (769 samples: Breast, Colorectum, Skin)
+│   └── WSI/                             # 2,217 unique .tiff slides organized by sub-cohort and case
+│       ├── HISTAI-breast/
+│       ├── HISTAI-colorectal-b1/
+│       ├── HISTAI-colorectal-b2/
+│       └── HISTAI-skin-b1/
+└── TCGA/
+    ├── SlideBench-Caption-TCGA.csv      # Caption/Report benchmark (1,555 samples, 1,547 slides)
+    ├── SlideBench-VQA-TCGA.csv          # VQA benchmark (3,176 samples, 1,292 slides across 31 tumors)
+    ├── Feat/
+    │   └── TCGA_patch_feat/             # 1,292 VQA (1,547 total) CONCH patch feature CSVs (~91 GB) [READY]
+    └── WSI/                             # 152 Round-5 stratified .svs WSIs across 31 tumors (~147 GB) [READY]
 ```
 
 ### Data Sources
@@ -43,6 +49,7 @@ By default, all dataset files are organized under `../Datasets/SlideBench`:
 | **BCNB** | `General-Medical-AI/SlideChat` | [`Anonymous192234/BCNB`](https://huggingface.co/datasets/Anonymous192234/BCNB) (18 `.zip` archives) | `1,058` `.jpg` WSIs + `.json` (`~37.1 GB`) |
 | **CPTAC** | `General-Medical-AI/SlideChat` | [TCIA PathDB Server](https://pathdb.cancerimagingarchive.net/) | `270` `.svs` WSIs (`~98.4 GB`) |
 | **Histai** | `General-Medical-AI/SlideChat` | Official [`histai`](https://huggingface.co/histai) Hugging Face repositories | `2,217` `.tiff` WSIs (`~420–520 GB`) |
+| **TCGA** | `General-Medical-AI/SlideChat` (`1,547` CSVs, `~91 GB`) | [NCI GDC Data Portal API](https://api.gdc.cancer.gov/) | `152` Round-5 stratified `.svs` WSIs (`~147 GB`, `345` VQA samples across 31 tumors) |
 
 ---
 
@@ -86,7 +93,13 @@ Run `download_slidebench.py` by specifying the desired execution phase:
 # Phase 5: Download and extract all 18 BCNB WSI .zip parts
 .venv/bin/python download_slidebench.py --phase bcnb
 
-# Phase 6: Verify downloaded CSVs, features, and WSI file counts
+# Phase 6: Stream-extract SlideBench TCGA CONCH patch features from Hugging Face
+.venv/bin/python download_slidebench.py --phase tcga-feat --workers 4
+
+# Phase 7: Download TCGA .svs WSIs from NCI GDC API in stratified round-robin tumor order
+.venv/bin/python download_slidebench.py --phase tcga --workers 6
+
+# Verify downloaded CSVs, features, and WSI file counts
 .venv/bin/python download_slidebench.py --phase verify
 ```
 

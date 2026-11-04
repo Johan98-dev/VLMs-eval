@@ -124,7 +124,7 @@ def main() -> int:
     parser.add_argument(
         "--cohorts",
         nargs="+",
-        choices=["BCNB", "CPTAC", "Histai"],
+        choices=["BCNB", "CPTAC", "Histai", "TCGA"],
         default=["BCNB"],
         help="SlideBench cohorts to evaluate (default: BCNB).",
     )
@@ -179,6 +179,7 @@ def main() -> int:
             datasets_dir=paths.datasets_dir,
             cohort=cohort,
             require_features=(args.model == "slidechat"),
+            require_wsi=(args.model in ("prism2", "mllm-hwsi")),
         )
         if args.limit > 0:
             cohort_samples = select_stratified_pilot_samples(

@@ -1,6 +1,6 @@
-# Stage 1 — Closed-Ended & Binary VQA Benchmark Report (BCNB, CPTAC & Histai)
+# Stage 1 — Closed-Ended & Binary VQA Benchmark Report (BCNB, CPTAC, Histai & TCGA Validation Setup)
 
-This document summarizes the complete **Stage 1 Closed-Ended Visual Question Answering (VQA)** evaluation across all three **SlideBench** non-TCGA cohorts: **BCNB** (`7,274` samples, `1,058` `.jpg` slides), **CPTAC** (`240` samples, `240` `.svs` slides), and **Histai** (`769` samples, `769` `.tiff` slides).
+This document summarizes the **Stage 1 Closed-Ended Visual Question Answering (VQA)** evaluation across the three **SlideBench** non-TCGA cohorts (**BCNB**: `7,274` samples / `1,058` `.jpg` slides; **CPTAC**: `240` samples / `240` `.svs` slides; and **Histai**: `769` samples / `769` `.tiff` slides), along with the acquisition and specification of the **TCGA Validation Cohort** (`3,176` full VQA samples across `1,292` slides and `31` tumor types, plus the `152`-slide / `345`-question **Round-5 Stratified Validation Subset** of `.svs` Whole-Slide Images).
 
 ---
 
@@ -103,7 +103,69 @@ All `769` questions are 3-option multiple-choice diagnostic questions (`random b
 
 ---
 
-## 5. Computational Performance & Runtime Profile (`2 × RTX 4090`)
+## 5. Cohort 4: TCGA Validation Cohort — Dataset Acquisition & Stratified Specification
+
+To complement the non-TCGA Stage 1 benchmarks (`BCNB`, `CPTAC`, and `Histai`), the **SlideBench-VQA-TCGA** cohort was incorporated into `../Datasets/SlideBench/TCGA/` via [`download_slidebench.py`](../download_slidebench.py).
+
+### 5.1 Full TCGA Benchmark vs. Round-5 Stratified WSI Validation Subset
+
+| Asset / Split | Source | Slides | VQA Questions | Tumor Cohorts | Narrow Categories | Disk Footprint | Status |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **TCGA CSV Annotations** | `General-Medical-AI/SlideChat` | 1,292 VQA (`1,547` total) | **3,176** (`+ 1,555` Captions) | **31 / 31 (100%)** | **13 / 13 (100%)** | `3.3 MB` | **READY (100%)** |
+| **TCGA CONCH Patch Features (`.csv`)** | `Feat/TCGA_patch_feat` (HF Stream) | **1,292 / 1,292** VQA (`1,547` total) | **3,176 / 3,176 (100%)** | **31 / 31 (100%)** | **13 / 13 (100%)** | `91.0 GB` | **READY (100%)** |
+| **TCGA Round-5 Stratified WSIs (`.svs`)** | NCI GDC API (`api.gdc.cancer.gov`) | **152 / 152** (`5` per tumor*) | **345** (`10.9%` of full) | **31 / 31 (100%)** | **13 / 13 (100%)** | `147.0 GB` | **READY (100%)** |
+
+*\*Note: `30` of the `31` TCGA tumor cohorts contribute exactly `5` `.svs` slides each (`150` slides), while `ACC` (which has only `2` slides in the entire SlideBench-VQA-TCGA benchmark) contributes both of its `2` slides (`152` slides total).*
+
+### 5.2 Taxonomic Distribution by Broad & Narrow Category
+
+The **Round-5 Stratified Validation Subset (`152` `.svs` slides, `345` VQA questions)** preserves the exact clinical category proportions of the full `3,176`-question TCGA benchmark while balancing representation across all `31` cancer types:
+
+| Broad Category | Narrow Category | Full TCGA (`1,292` slides) | Full % | Round-5 Validation (`152` `.svs` slides) | Round-5 % |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| **Diagnosis** | `Disease Classification` | 828 | 26.07% | 102 | 29.57% |
+| | `Grading` | 608 | 19.14% | 67 | 19.42% |
+| | `Staging` | 475 | 14.96% | 36 | 10.43% |
+| | `Differential Diagnosis` | 123 | 3.87% | 14 | 4.06% |
+| | `Disease Detection` | 42 | 1.32% | 3 | 0.87% |
+| *Subtotal — Diagnosis* | *All 5 Diagnostic Subcategories* | *2,076* | *65.37%* | *222* | *64.35%* |
+| **Microscopy** | `Tissue Architecture and Arrangement` | 362 | 11.40% | 43 | 12.46% |
+| | `Histopathological Changes` | 328 | 10.33% | 38 | 11.01% |
+| | `Tumor Characteristics` | 163 | 5.13% | 19 | 5.51% |
+| | `Cytomorphological Characteristics` | 84 | 2.64% | 10 | 2.90% |
+| | `Disease Detection` | 1 | 0.03% | 0 | 0.00% |
+| *Subtotal — Microscopy* | *Microscopic & Morphological Subcategories* | *938* | *29.53%* | *110* | *31.88%* |
+| **Clinical** | `Treatment Guidance` | 68 | 2.14% | 5 | 1.45% |
+| | `Prognostic Assessment` | 39 | 1.23% | 1 | 0.29% |
+| | `Risk Factors` | 28 | 0.88% | 2 | 0.58% |
+| | `Biomarker Analysis` | 27 | 0.85% | 5 | 1.45% |
+| *Subtotal — Clinical* | *All 4 Clinical Subcategories* | *162* | *5.10%* | *13* | *3.77%* |
+| **TCGA Total** | **All 13 Narrow Categories** | **3,176** | **100.00%** | **345** | **100.00%** |
+
+### 5.3 Per-Tumor Slide & Question Coverage (`31` TCGA Cohorts)
+
+| Tumor Code | Full Slides | Full Questions | Round-5 `.svs` Slides | Round-5 Questions | Tumor Code | Full Slides | Full Questions | Round-5 `.svs` Slides | Round-5 Questions |
+| :--- | :---: | :---: | :---: | :---: | :--- | :---: | :---: | :---: | :---: |
+| **ACC** | 2 | 8 | 2 | 8 | **LUSC** | 70 | 173 | 5 | 11 |
+| **BLCA** | 58 | 145 | 5 | 9 | **MESO** | 8 | 16 | 5 | 9 |
+| **BRCA** | 169 | 446 | 5 | 12 | **OV** | 10 | 22 | 5 | 8 |
+| **CESC** | 39 | 96 | 5 | 15 | **PAAD** | 24 | 54 | 5 | 11 |
+| **CHOL** | 8 | 23 | 5 | 15 | **PCPG** | 26 | 50 | 5 | 8 |
+| **COAD** | 58 | 156 | 5 | 15 | **PRAD** | 65 | 169 | 5 | 13 |
+| **DLBC** | 8 | 14 | 5 | 6 | **READ** | 29 | 80 | 5 | 13 |
+| **ESCA** | 17 | 38 | 5 | 12 | **SARC** | 25 | 61 | 5 | 11 |
+| **GBM** | 18 | 31 | 5 | 5 | **SKCM** | 17 | 42 | 5 | 12 |
+| **HNSC** | 44 | 116 | 5 | 10 | **STAD** | 55 | 122 | 5 | 10 |
+| **KICH** | 18 | 41 | 5 | 8 | **TCGT** | 13 | 29 | 5 | 11 |
+| **KIRC** | 84 | 189 | 5 | 10 | **THCA** | 89 | 165 | 5 | 8 |
+| **KIRP** | 42 | 95 | 5 | 10 | **THYM** | 19 | 57 | 5 | 19 |
+| **LGG** | 57 | 133 | 5 | 12 | **UCEC** | 84 | 216 | 5 | 15 |
+| **LIHC** | 58 | 172 | 5 | 15 | **UCS** | 7 | 17 | 5 | 13 |
+| **LUAD** | 71 | 200 | 5 | 11 | **Total (31)** | **1,292** | **3,176** | **152** | **345** |
+
+---
+
+## 6. Computational Performance & Runtime Profile (`2 × RTX 4090`)
 
 Note: On-demand feature extraction was parallelized across both GPUs (`cuda:0` and `cuda:1`) and cached under `../Datasets/SlideBench/{BCNB,CPTAC,Histai}/Feat/`. Once features are cached on disk, pure VQA inference latency is `<0.16 s` per question for all three models.
 
@@ -115,7 +177,7 @@ Note: On-demand feature extraction was parallelized across both GPUs (`cuda:0` a
 
 ---
 
-## 6. Output Artifacts & Reproducibility Index
+## 7. Output Artifacts & Reproducibility Index
 
 - **Consolidated CSV Table:** [`results/stage1_vqa/stage1_vqa_consolidated_summary.csv`](../results/stage1_vqa/stage1_vqa_consolidated_summary.csv)
 - **BCNB Full Runs:**

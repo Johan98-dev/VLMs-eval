@@ -60,13 +60,15 @@ def load_slidebench_vqa_cohort(
     datasets_dir: Path,
     cohort: str,
     require_features: bool = False,
+    require_wsi: bool = False,
 ) -> List[VQASample]:
-    """Load VQASample items for a given SlideBench cohort (BCNB, CPTAC, or Histai).
+    """Load VQASample items for a given SlideBench cohort (BCNB, CPTAC, Histai, or TCGA).
 
     Args:
         datasets_dir: Base SlideBench directory (../Datasets/SlideBench).
-        cohort: Cohort name ('BCNB', 'CPTAC', or 'Histai').
-        require_features: If True, filter out samples without pre-extracted feature files.
+        cohort: Cohort name ('BCNB', 'CPTAC', 'Histai', or 'TCGA').
+        require_features: If True, filter out samples without pre-extracted feature files or WSIs.
+        require_wsi: If True, filter out samples without a local WSI file.
 
     Returns:
         List of parsed VQASample instances.
@@ -112,12 +114,17 @@ def load_slidebench_vqa_cohort(
                 cand_wsi = cohort_dir / "WSI" / f"{slide_id}.jpg"
                 if cand_wsi.exists():
                     wsi_path = cand_wsi
-            elif cohort == "CPTAC":
+            elif cohort in ("CPTAC", "TCGA"):
                 tumor = str(row.get("Tumor", "")).strip()
                 cand_feat_csv = cohort_dir / "Feat" / tumor / f"{slide_id}.csv"
+                cand_feat_tcga_csv = (
+                    cohort_dir / "Feat" / "TCGA_patch_feat" / tumor / f"{slide_id}.csv"
+                )
                 cand_feat_pt = cohort_dir / "Feat" / "SlideChat_CONCH" / f"{slide_id}.pt"
                 if cand_feat_csv.exists():
                     feature_path = cand_feat_csv
+                elif cand_feat_tcga_csv.exists():
+                    feature_path = cand_feat_tcga_csv
                 elif cand_feat_pt.exists():
                     feature_path = cand_feat_pt
                 cand_wsi = cohort_dir / "WSI" / tumor / f"{slide_id}.svs"
@@ -138,6 +145,8 @@ def load_slidebench_vqa_cohort(
                     if cand_wsi.exists():
                         wsi_path = cand_wsi
 
+            if require_wsi and wsi_path is None:
+                continue
             if require_features and feature_path is None and wsi_path is None:
                 continue
 
