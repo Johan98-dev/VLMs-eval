@@ -1,11 +1,11 @@
-"""PRISM2 Whole-Slide Image VLM adapter for Stage 1 closed-ended VQA."""
+"""PRISM2 Whole-Slide Image VLM adapter for Stage 1 VQA and Stage 2 Captioning."""
 
 from __future__ import annotations
 
 import importlib.util
 import sys
 import types
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 
 from safetensors.torch import load_file
 import torch
@@ -16,6 +16,7 @@ from transformers.masking_utils import create_causal_mask
 from transformers.models.phi3.modeling_phi3 import Phi3Model
 
 from src.datasets.feature_extractor import Virchow2FeatureExtractor
+from src.datasets.slidebench_caption import CaptionSample
 from src.datasets.slidebench_vqa import VQASample
 from src.models.base import BaseWSIVLM
 from src.utils.paths import ProjectPaths
@@ -184,7 +185,7 @@ class PRISM2Adapter(BaseWSIVLM):
         }
 
 
-    def _get_tile_embeddings(self, sample: VQASample) -> Tensor:
+    def _get_tile_embeddings(self, sample: Union[VQASample, CaptionSample]) -> Tensor:
         """Load cached (N, 1280) Virchow2 tile embeddings for `sample`, extracting if needed."""
         cache_key = f"{sample.cohort}:{sample.slide_id}"
         if cache_key in self._feature_cache:
@@ -215,6 +216,9 @@ class PRISM2Adapter(BaseWSIVLM):
         tiles = torch.load(pt_path, map_location="cpu", weights_only=False).to(
             device=self.device, dtype=self.dtype
         )
+        if len(self._feature_cache) >= 8:
+            oldest_key = next(iter(self._feature_cache))
+            del self._feature_cache[oldest_key]
         self._feature_cache[cache_key] = tiles
         return tiles
 
@@ -228,9 +232,16 @@ class PRISM2Adapter(BaseWSIVLM):
             "Answer with the single best option letter (e.g., A, B, C, or D)."
         )
 
+    def build_caption_prompt(self, sample: CaptionSample) -> str:
+        """Format an open-ended pathology report generation prompt for PRISM2."""
+        return sample.format_caption_prompt()
+
     @torch.inference_mode()
     def predict_vqa(self, sample: VQASample, max_new_tokens: int = 32) -> str:
         """Generate a raw closed-ended VQA response for a single sample."""
+        self.load()
+        assert self.processor is not None and self.model is not None
+
         tiles = self._get_tile_embeddings(sample)
         batch = self.processor([tiles])
         tile_embeddings = batch["tile_embeddings"].to(device=self.device, dtype=self.dtype)
@@ -264,3 +275,29 @@ class PRISM2Adapter(BaseWSIVLM):
                 return "A. Yes" if score >= 0.5 else "B. No"
 
         return response_text
+
+    @torch.inference_mode()
+    def predict_caption(self, sample: CaptionSample, max_new_tokens: int = 512) -> str:
+        """Generate an open-ended pathology report or caption for a single CaptionSample."""
+        self.load()
+        assert self.processor is not None and self.model is not None
+
+        tiles = self._get_tile_embeddings(sample)
+        batch = self.processor([tiles])
+        tile_embeddings = batch["tile_embeddings"].to(device=self.device, dtype=self.dtype)
+        attention_mask = batch["attention_mask"].to(device=self.device)
+
+        prompt = self.build_caption_prompt(sample)
+        with torch.amp.autocast(
+            device_type=self.device.type,
+            dtype=self.dtype,
+            enabled=(self.device.type == "cuda"),
+        ):
+            responses = self.model.get_response(
+                tile_embeddings=tile_embeddings,
+                attention_mask=attention_mask,
+                prompt=prompt,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+            )
+            return responses[0].strip()

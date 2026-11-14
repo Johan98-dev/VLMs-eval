@@ -5,9 +5,6 @@ import random
 from pathlib import Path
 from typing import Any, Dict, List, Set
 
-import numpy as np
-import torch
-
 
 def set_global_seed(seed: int = 42) -> None:
     """Set deterministic random seeds across Python, NumPy, and PyTorch.
@@ -16,10 +13,20 @@ def set_global_seed(seed: int = 42) -> None:
         seed: Integer random seed.
     """
     random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+    try:
+        import numpy as np
+
+        np.random.seed(seed)
+    except ImportError:
+        pass
+    try:
+        import torch
+
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+    except ImportError:
+        pass
 
 
 def load_jsonl_records(jsonl_path: Path) -> List[Dict[str, Any]]:

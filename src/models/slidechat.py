@@ -2,7 +2,7 @@
 
 import math
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from einops import rearrange
 import torch
@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 
 from src.datasets.feature_extractor import SlideChatConchFeatureExtractor
+from src.datasets.slidebench_caption import CaptionSample
 from src.datasets.slidebench_vqa import VQASample, load_patch_features_csv
 from src.models.base import BaseWSIVLM
 from src.utils.paths import ProjectPaths
@@ -364,9 +365,54 @@ class SlideChatAdapter(BaseWSIVLM):
             "position_ids": position_ids,
         }
 
-    @torch.inference_mode()
-    def predict_vqa(self, sample: VQASample, max_new_tokens: int = 128) -> str:
-        """Run SlideChat inference on a single VQASample."""
+    def _get_pixel_values(self, sample: Union[VQASample, CaptionSample]) -> torch.Tensor:
+        """Load or extract CONCH patch features and project them via LongNet + MLP."""
+        assert self.longnet_encoder is not None and self.projector is not None
+        cache_key = f"{sample.cohort}:{sample.slide_id}"
+        if self._last_cache_key == cache_key and self._last_pixel_values is not None:
+            return self._last_pixel_values
+
+        self._last_pixel_values = None
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        feat_path = sample.feature_path
+        if feat_path is None or not feat_path.exists():
+            if sample.wsi_path is None or not sample.wsi_path.is_file():
+                raise FileNotFoundError(
+                    f"SlideChat requires patch features or WSI for slide {sample.slide_id}, "
+                    f"but feature_path={sample.feature_path} and wsi_path={sample.wsi_path} were not found."
+                )
+            if self._conch_extractor is None:
+                self._conch_extractor = SlideChatConchFeatureExtractor(
+                    paths=self.paths, device=str(self.device)
+                )
+            feat_path = self._conch_extractor.extract_or_load(
+                wsi_path=sample.wsi_path,
+                cohort=sample.cohort,
+            )
+
+        patch_feats = load_patch_features_csv(
+            feat_path, max_patches=self.max_patches
+        ).to(device=self.device, dtype=self.dtype)
+
+        # SlideChat LongNet expects (N, 1, 512) -> permute back to (1, N, 512)
+        encoded = self.longnet_encoder(
+            src_tokens=None, token_embeddings=patch_feats.permute(1, 0, 2)
+        )["encoder_out"].permute(1, 0, 2)
+        pixel_values = self.projector(encoded)
+        del patch_feats, encoded
+        self._last_cache_key = cache_key
+        self._last_pixel_values = pixel_values
+        return pixel_values
+
+    def _generate_from_prompt(
+        self,
+        sample: Union[VQASample, CaptionSample],
+        prompt_text: str,
+        max_new_tokens: int,
+    ) -> str:
+        """Run SlideChat autoregressive decoding for a given sample and text prompt."""
         self.load()
         assert (
             self.longnet_encoder is not None
@@ -375,44 +421,7 @@ class SlideChatAdapter(BaseWSIVLM):
             and self.tokenizer is not None
         )
 
-        cache_key = f"{sample.cohort}:{sample.slide_id}"
-        if self._last_cache_key == cache_key and self._last_pixel_values is not None:
-            pixel_values = self._last_pixel_values
-        else:
-            self._last_pixel_values = None
-            if self.device.type == "cuda":
-                torch.cuda.empty_cache()
-
-            feat_path = sample.feature_path
-            if feat_path is None or not feat_path.exists():
-                if sample.wsi_path is None or not sample.wsi_path.is_file():
-                    raise FileNotFoundError(
-                        f"SlideChat requires patch features or WSI for slide {sample.slide_id}, "
-                        f"but feature_path={sample.feature_path} and wsi_path={sample.wsi_path} were not found."
-                    )
-                if self._conch_extractor is None:
-                    self._conch_extractor = SlideChatConchFeatureExtractor(
-                        paths=self.paths, device=str(self.device)
-                    )
-                feat_path = self._conch_extractor.extract_or_load(
-                    wsi_path=sample.wsi_path,
-                    cohort=sample.cohort,
-                )
-
-            patch_feats = load_patch_features_csv(
-                feat_path, max_patches=self.max_patches
-            ).to(device=self.device, dtype=self.dtype)
-
-            # SlideChat LongNet expects (N, 1, 512) -> permute back to (1, N, 512)
-            encoded = self.longnet_encoder(
-                src_tokens=None, token_embeddings=patch_feats.permute(1, 0, 2)
-            )["encoder_out"].permute(1, 0, 2)
-            pixel_values = self.projector(encoded)
-            del patch_feats, encoded
-            self._last_cache_key = cache_key
-            self._last_pixel_values = pixel_values
-
-        prompt_text = sample.format_closed_prompt()
+        pixel_values = self._get_pixel_values(sample)
         mm_inputs = self._prepare_multimodal_inputs(prompt_text, pixel_values)
 
         eos_id = self.tokenizer.eos_token_id
@@ -434,6 +443,24 @@ class SlideChatAdapter(BaseWSIVLM):
         if decoded.endswith("<|im_end|>"):
             decoded = decoded[: -len("<|im_end|>")].strip()
         return decoded
+
+    @torch.inference_mode()
+    def predict_vqa(self, sample: VQASample, max_new_tokens: int = 128) -> str:
+        """Run SlideChat inference on a single closed-ended or binary VQASample."""
+        return self._generate_from_prompt(
+            sample=sample,
+            prompt_text=sample.format_closed_prompt(),
+            max_new_tokens=max_new_tokens,
+        )
+
+    @torch.inference_mode()
+    def predict_caption(self, sample: CaptionSample, max_new_tokens: int = 512) -> str:
+        """Run SlideChat open-ended pathology report generation on a single CaptionSample."""
+        return self._generate_from_prompt(
+            sample=sample,
+            prompt_text=sample.format_caption_prompt(),
+            max_new_tokens=max_new_tokens,
+        )
 
     def metadata(self) -> Dict[str, Any]:
         """Return SlideChat model configuration metadata."""

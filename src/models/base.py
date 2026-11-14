@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from typing import Any, Dict
 
+from src.datasets.slidebench_caption import CaptionSample
 from src.datasets.slidebench_vqa import VQASample
 
 
@@ -28,5 +29,18 @@ class BaseWSIVLM(ABC):
         """
 
     @abstractmethod
+    def predict_caption(self, sample: CaptionSample, max_new_tokens: int = 512) -> str:
+        """Generate an open-ended pathology report or caption for a single WSI sample.
+
+        Args:
+            sample: Standardized CaptionSample containing slide features/path and prompt.
+            max_new_tokens: Maximum number of tokens to generate.
+
+        Returns:
+            Decoded pathology report / caption string.
+        """
+
+    @abstractmethod
     def metadata(self) -> Dict[str, Any]:
         """Return model configuration metadata for reproducibility logging."""
+

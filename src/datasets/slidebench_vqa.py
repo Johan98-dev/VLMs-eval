@@ -1,14 +1,15 @@
 """SlideBench Closed-Ended VQA dataset loader (Multiple-Choice & Binary/Yes-No)."""
 
+from __future__ import annotations
+
 import ast
 import csv
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import TYPE_CHECKING, Dict, List, Optional, Sequence
 
-import numpy as np
-import pandas as pd
-import torch
+if TYPE_CHECKING:
+    import torch
 
 
 @dataclass(frozen=True)
@@ -281,6 +282,10 @@ def load_patch_features_csv(feature_csv_path: Path, max_patches: int = 38400) ->
     Returns:
         Float tensor of shape (1, num_patches, 512).
     """
+    import numpy as np
+    import pandas as pd
+    import torch
+
     if feature_csv_path.suffix == ".pt":
         tensor = torch.load(feature_csv_path, map_location="cpu", weights_only=False).float()
         if tensor.ndim == 3:

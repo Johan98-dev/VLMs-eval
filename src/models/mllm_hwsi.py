@@ -1,4 +1,4 @@
-"""MLLM-HWSI Whole-Slide Image VLM adapter for Stage 1 closed-ended VQA."""
+"""MLLM-HWSI Whole-Slide Image VLM adapter for Stage 1 VQA and Stage 2 Captioning."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.datasets.feature_extractor import MLLMHWSIFeatureExtractor
+from src.datasets.slidebench_caption import CaptionSample
 from src.datasets.slidebench_vqa import VQASample
 from src.models.base import BaseWSIVLM
 from src.utils.paths import ProjectPaths
@@ -303,7 +304,7 @@ class MLLMHWSIAdapter(BaseWSIVLM):
         }
 
 
-    def _get_quadruplet(self, sample: VQASample) -> Dict[str, Tensor]:
+    def _get_quadruplet(self, sample: Union[VQASample, CaptionSample]) -> Dict[str, Tensor]:
         """Load cached (wsi, region, patch, cell) tensors for `sample`, extracting if needed."""
         cache_key = f"{sample.cohort}:{sample.slide_id}"
         if cache_key in self._feature_cache:
@@ -335,6 +336,9 @@ class MLLMHWSIAdapter(BaseWSIVLM):
             k: v.to(device=self.device, dtype=torch.float32)
             for k, v in payload.items()
         }
+        if len(self._feature_cache) >= 8:
+            oldest_key = next(iter(self._feature_cache))
+            del self._feature_cache[oldest_key]
         self._feature_cache[cache_key] = quad
         return quad
 
@@ -347,6 +351,10 @@ class MLLMHWSIAdapter(BaseWSIVLM):
             f"Options:\n{options_block}\n"
             "Select the single best option and begin your answer with the option letter (e.g., A, B, C, or D)."
         )
+
+    def build_caption_prompt(self, sample: CaptionSample) -> str:
+        """Format an open-ended pathology report generation prompt for MLLM-HWSI."""
+        return sample.format_caption_prompt()
 
     def _format_chat(self, prompt: str) -> str:
         messages = [
@@ -365,9 +373,21 @@ class MLLMHWSIAdapter(BaseWSIVLM):
             "<|im_start|>assistant\n"
         )
 
-    @torch.inference_mode()
-    def predict_vqa(self, sample: VQASample, max_new_tokens: int = 32) -> str:
-        """Generate a raw closed-ended VQA response for a single sample."""
+    def _generate_from_prompt(
+        self,
+        sample: Union[VQASample, CaptionSample],
+        prompt_text: str,
+        max_new_tokens: int,
+    ) -> str:
+        """Run MLLM-HWSI multi-level projection and autoregressive decoding."""
+        self.load()
+        assert (
+            self.vl_projector is not None
+            and self.tokenizer is not None
+            and self.embed_tokens is not None
+            and self.llm is not None
+        )
+
         quad = self._get_quadruplet(sample)
         slide_tokens = self.vl_projector(
             wsi=quad["wsi"],
@@ -376,7 +396,7 @@ class MLLMHWSIAdapter(BaseWSIVLM):
             cell=quad["cell"],
         ).to(dtype=self.dtype)
 
-        formatted_prompt = self._format_chat(self.build_prompt(sample))
+        formatted_prompt = self._format_chat(prompt_text)
         text_inputs = self.tokenizer(
             formatted_prompt,
             return_tensors="pt",
@@ -406,3 +426,21 @@ class MLLMHWSIAdapter(BaseWSIVLM):
             eos_token_id=self.tokenizer.eos_token_id,
         )
         return self.tokenizer.decode(generated_ids[0], skip_special_tokens=True).strip()
+
+    @torch.inference_mode()
+    def predict_vqa(self, sample: VQASample, max_new_tokens: int = 32) -> str:
+        """Generate a raw closed-ended VQA response for a single sample."""
+        return self._generate_from_prompt(
+            sample=sample,
+            prompt_text=self.build_prompt(sample),
+            max_new_tokens=max_new_tokens,
+        )
+
+    @torch.inference_mode()
+    def predict_caption(self, sample: CaptionSample, max_new_tokens: int = 512) -> str:
+        """Generate an open-ended pathology report or caption for a single CaptionSample."""
+        return self._generate_from_prompt(
+            sample=sample,
+            prompt_text=self.build_caption_prompt(sample),
+            max_new_tokens=max_new_tokens,
+        )
