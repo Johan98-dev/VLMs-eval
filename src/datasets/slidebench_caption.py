@@ -161,6 +161,7 @@ def load_slidebench_caption_cohort(
     cohort: str,
     require_features: bool = False,
     require_wsi: bool = False,
+    csv_path: Optional[Path] = None,
 ) -> List[CaptionSample]:
     """Load `CaptionSample` items for a SlideBench caption cohort (`CPTAC`, `Histai`, or `TCGA`).
 
@@ -169,11 +170,13 @@ def load_slidebench_caption_cohort(
         cohort: Cohort name (`'CPTAC'`, `'Histai'`, or `'TCGA'`).
         require_features: If True, filter out samples that have neither pre-extracted features nor a local WSI.
         require_wsi: If True, filter out samples without a local WSI file (`.svs` or `.tiff`).
+        csv_path: Optional explicit CSV path override (e.g. for unseen/deduplicated evaluation sets).
 
     Returns:
         List of parsed `CaptionSample` instances.
     """
-    csv_path = resolve_caption_csv_path(datasets_dir=datasets_dir, cohort=cohort)
+    if csv_path is None:
+        csv_path = resolve_caption_csv_path(datasets_dir=datasets_dir, cohort=cohort)
     cohort_dir = datasets_dir / cohort
 
     samples: List[CaptionSample] = []
@@ -217,8 +220,15 @@ def load_slidebench_caption_cohort(
                     feature_path = cand_feat_pt
 
                 cand_wsi = cohort_dir / "WSI" / tumor / f"{slide_id}.svs"
+                cand_wsi_unseen = cohort_dir / "WSI_unseen_mllm" / tumor / f"{slide_id}.svs"
                 if cand_wsi.exists():
                     wsi_path = cand_wsi
+                elif cand_wsi_unseen.exists():
+                    wsi_path = cand_wsi_unseen
+                elif (cohort_dir / "WSI_unseen_mllm" / f"{slide_id}.svs").exists():
+                    wsi_path = cohort_dir / "WSI_unseen_mllm" / f"{slide_id}.svs"
+                elif (cohort_dir / "WSI" / f"{slide_id}.svs").exists():
+                    wsi_path = cohort_dir / "WSI" / f"{slide_id}.svs"
 
             elif cohort == "Histai":
                 slide_id, feature_path, wsi_path = _resolve_histai_paths(

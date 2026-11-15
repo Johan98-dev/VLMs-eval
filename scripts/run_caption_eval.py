@@ -137,7 +137,7 @@ def print_caption_evaluation_report(
     header = (
         f"  {'BLEU-1':>8} {'BLEU-2':>8} {'BLEU-3':>8} {'BLEU-4':>8} | "
         f"{'cBLEU-4':>8} | {'ROUGE-1':>8} {'ROUGE-2':>8} {'ROUGE-L':>8} | "
-        f"{'METEOR':>8} {'CIDEr':>8}"
+        f"{'METEOR':>8} {'CIDEr':>8} {'Clin-F1':>8}"
     )
     row = (
         f"  {metrics.get('bleu_1', 0.0) * 100:7.2f}% "
@@ -149,7 +149,8 @@ def print_caption_evaluation_report(
         f"{metrics.get('rouge_2', 0.0) * 100:7.2f}% "
         f"{metrics.get('rouge_l', 0.0) * 100:7.2f}% | "
         f"{metrics.get('meteor', 0.0) * 100:7.2f}% "
-        f"{metrics.get('cider', 0.0):8.4f}"
+        f"{metrics.get('cider', 0.0):8.4f} "
+        f"{metrics.get('clinical_f1', 0.0) * 100:7.2f}%"
     )
     if "bertscore_f1" in metrics:
         header += f" | {'BERT-F1':>8}"
@@ -163,14 +164,14 @@ def print_caption_evaluation_report(
         print("\n--- Breakdown by Cohort ---")
         print(
             f"  {'Cohort':<12} {'N':>5} {'BLEU-1':>8} {'BLEU-4':>8} "
-            f"{'ROUGE-L':>8} {'METEOR':>8} {'CIDEr':>8}"
+            f"{'ROUGE-L':>8} {'METEOR':>8} {'CIDEr':>8} {'Clin-F1':>8}"
         )
         for cohort_name, c_stats in by_cohort.items():
             print(
                 f"  {cohort_name:<12} {c_stats['total_samples']:>5} "
                 f"{c_stats['bleu_1'] * 100:7.2f}% {c_stats['bleu_4'] * 100:7.2f}% "
                 f"{c_stats['rouge_l'] * 100:7.2f}% {c_stats['meteor'] * 100:7.2f}% "
-                f"{c_stats['cider']:8.4f}"
+                f"{c_stats['cider']:8.4f} {c_stats.get('clinical_f1', 0.0) * 100:7.2f}%"
             )
 
     by_task = metrics.get("by_task", {})
@@ -178,7 +179,7 @@ def print_caption_evaluation_report(
         print("\n--- Breakdown by Clinical Task / Tumor / Organ ---")
         print(
             f"  {'Task/Organ':<18} {'N':>5} {'BLEU-1':>8} {'BLEU-4':>8} "
-            f"{'ROUGE-L':>8} {'METEOR':>8} {'CIDEr':>8} {'Words(P/R)':>12}"
+            f"{'ROUGE-L':>8} {'METEOR':>8} {'CIDEr':>8} {'Clin-F1':>8} {'Words(P/R)':>12}"
         )
         for task_name, t_stats in by_task.items():
             words_str = f"{t_stats['avg_pred_words']:.0f}/{t_stats['avg_ref_words']:.0f}"
@@ -186,7 +187,7 @@ def print_caption_evaluation_report(
                 f"  {task_name:<18} {t_stats['total_samples']:>5} "
                 f"{t_stats['bleu_1'] * 100:7.2f}% {t_stats['bleu_4'] * 100:7.2f}% "
                 f"{t_stats['rouge_l'] * 100:7.2f}% {t_stats['meteor'] * 100:7.2f}% "
-                f"{t_stats['cider']:8.4f} {words_str:>12}"
+                f"{t_stats['cider']:8.4f} {t_stats.get('clinical_f1', 0.0) * 100:7.2f}% {words_str:>12}"
             )
 
     if show_samples and len(records) <= 25:
@@ -284,6 +285,12 @@ def main() -> int:
         help="HuggingFace model ID or local path for BERTScore (default: roberta-large).",
     )
     parser.add_argument(
+        "--caption-csv",
+        type=str,
+        default="",
+        help="Optional explicit path or filename to a custom caption CSV (e.g. SlideBench-Caption-TCGA-unseen-mllm.csv).",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Run end-to-end pipeline verification with synthetic outputs without loading GPU weights.",
@@ -302,11 +309,24 @@ def main() -> int:
             if args.dry_run
             else (args.require_wsi or args.model in ("prism2", "mllm-hwsi"))
         )
+        csv_override = None
+        if args.caption_csv:
+            cand = Path(args.caption_csv)
+            if cand.is_file():
+                csv_override = cand
+            else:
+                cand_in_cohort = paths.datasets_dir / cohort / args.caption_csv
+                if cand_in_cohort.is_file():
+                    csv_override = cand_in_cohort
+                else:
+                    raise FileNotFoundError(f"Custom caption CSV not found: {args.caption_csv}")
+
         cohort_samples = load_slidebench_caption_cohort(
             datasets_dir=paths.datasets_dir,
             cohort=cohort,
             require_features=require_features,
             require_wsi=require_wsi,
+            csv_path=csv_override,
         )
         if effective_limit > 0:
             cohort_samples = select_stratified_caption_pilot_samples(
@@ -322,6 +342,9 @@ def main() -> int:
         return 1
 
     cohort_tag = "_".join(args.cohorts).lower()
+    if args.caption_csv:
+        csv_stem = Path(args.caption_csv).stem.lower().replace("slidebench-caption-", "").replace("slidebench-", "")
+        cohort_tag = f"{cohort_tag}_{csv_stem}"
     limit_tag = f"pilot{effective_limit}" if effective_limit > 0 else "full"
     dry_suffix = "_dryrun" if args.dry_run else ""
     run_name = args.run_name or f"{args.model}_{cohort_tag}_{limit_tag}{dry_suffix}"

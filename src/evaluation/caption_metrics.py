@@ -3,9 +3,10 @@
 Provides self-contained implementations of standard image-captioning and clinical NLG metrics:
 - BLEU-1, BLEU-2, BLEU-3, BLEU-4 (corpus-level Papineni BLEU and smoothed sentence-level BLEU)
 - ROUGE-1, ROUGE-2, ROUGE-L (F1)
-- METEOR (unigram stem/exact alignment with fragmentation penalty)
+- METEOR (unigram exact + clinical/morphological stem alignment with fragmentation penalty)
 - CIDEr-D (TF-IDF weighted 1..4-gram cosine similarity with Gaussian length penalty)
-- BERTScore (optional contextual embedding P/R/F1 via `transformers` or `bert_score`)
+- Clinical Concept F1 (domain-specific histopathology entity Precision, Recall, F1)
+- BERTScore (optional contextual embedding P/R/F1 via `transformers` + `torch`)
 """
 
 from __future__ import annotations
@@ -13,15 +14,114 @@ from __future__ import annotations
 from collections import Counter
 import math
 import re
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
-_TOKEN_PATTERN = re.compile(r"[a-z0-9]+(?:\+[a-z0-9]*)?")
+_TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
+
+_CLINICAL_STEM_OVERRIDES: Dict[str, str] = {
+    "nuclei": "nucle",
+    "nucleus": "nucle",
+    "nuclear": "nucle",
+    "nucleoli": "nucleol",
+    "nucleolus": "nucleol",
+    "nucleolar": "nucleol",
+    "mitoses": "mitot",
+    "mitosis": "mitot",
+    "mitotic": "mitot",
+    "metastases": "metasta",
+    "metastasis": "metasta",
+    "metastatic": "metasta",
+    "necrosis": "necro",
+    "necrotic": "necro",
+    "fibrosis": "fibro",
+    "fibrotic": "fibro",
+    "fibrous": "fibro",
+    "hemorrhage": "hemorrhag",
+    "hemorrhagic": "hemorrhag",
+    "hemorrhages": "hemorrhag",
+    "acini": "acin",
+    "acinus": "acin",
+    "acinar": "acin",
+    "tubules": "tubul",
+    "tubule": "tubul",
+    "tubular": "tubul",
+    "papillae": "papill",
+    "papillary": "papill",
+    "glands": "gland",
+    "gland": "gland",
+    "glandular": "gland",
+    "cysts": "cyst",
+    "cyst": "cyst",
+    "cystic": "cyst",
+    "invasion": "invas",
+    "invasive": "invas",
+    "invading": "invas",
+    "invades": "invas",
+}
+
+_CLINICAL_CONCEPT_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = tuple(
+    (name, re.compile(pat, re.IGNORECASE))
+    for name, pat in (
+        # Histological types & primary diagnoses
+        ("adenocarcinoma", r"\badenocarcinomas?\b"),
+        ("endometrial_carcinoma", r"\b(?:endometrial|endometrioid)\s+(?:carcinomas?|adenocarcinomas?)\b"),
+        ("squamous_cell_carcinoma", r"\bsquamous\s+cell\s+carcinomas?\b|\bsquamous\s+differentiation\b"),
+        ("urothelial_carcinoma", r"\b(?:urothelial|transitional\s+cell)\s+carcinomas?\b"),
+        ("renal_cell_carcinoma", r"\brenal\s+cell\s+carcinomas?\b"),
+        ("clear_cell", r"\bclear\s+cells?\b|\bclear\s+cytoplasm\b|\btranslucent\b"),
+        ("invasive_ductal", r"\b(?:invasive|infiltrating)\s+(?:ductal|mammary)\s+carcinomas?\b|\bidc\b"),
+        ("invasive_lobular", r"\b(?:invasive|infiltrating)\s+lobular\s+carcinomas?\b|\bilc\b"),
+        ("carcinoma_in_situ", r"\bcarcinoma\s+in[\s\-]+situ\b|\bdcis\b|\blcis\b|\bptis\b"),
+        ("fibroadenoma", r"\bfibroadenomas?\b"),
+        ("phyllodes", r"\bphyllodes\b"),
+        ("hyperplasia", r"\bhyperplasia\b"),
+        ("adenosis", r"\badenosis\b"),
+        # Architectural, growth & cellular morphology patterns
+        ("acinar_glandular", r"\b(?:acinar|acini|glandular|glands?)\b"),
+        ("tubular", r"\b(?:tubular|tubules?)\b"),
+        ("papillary", r"\bpapillary\b"),
+        ("micropapillary", r"\bmicropapillary\b"),
+        ("cribriform", r"\bcribriform\b|\bsieve[\s\-]+like\b"),
+        ("solid_nests", r"\b(?:solid|nests?|nest[\s\-]+like|sheets?|sheet[\s\-]+like|clusters?)\b"),
+        ("trabecular_cords", r"\b(?:trabecular|cords?|cord[\s\-]+like)\b"),
+        ("columnar_cuboidal", r"\b(?:columnar|cuboidal|epithelioid|pseudostratified)\b"),
+        # Grading & differentiation
+        ("grade_1_low", r"\b(?:grade\s*(?:1|i)\b|g1\b|low[\s\-]+grade|well[\s\-]+differentiated)\b"),
+        ("grade_2_moderate", r"\b(?:grade\s*(?:2|ii)\b|g2\b|intermediate\s+grade|moderately\s+differentiated)\b"),
+        ("grade_3_high", r"\b(?:grade\s*(?:3|iii|4|iv)\b|g3\b|g4\b|high[\s\-]+grade|poorly\s+differentiated)\b"),
+        ("gleason", r"\bgleason\b"),
+        # Cellular, nuclear & stromal features
+        ("pleomorphism_atypia", r"\b(?:pleomorph\w+|atypia|atypical)\b"),
+        ("nucleoli", r"\bnucleol(?:i|us|ar)\b"),
+        ("mitotic_activity", r"\b(?:mitos[ei]s|mitotic)\b"),
+        ("necrosis", r"\b(?:necros[ei]s|necrotic)\b"),
+        ("hemorrhage", r"\bhemorrhag\w+\b"),
+        ("fibrosis_desmoplasia", r"\b(?:fibros[ei]s|fibrotic|desmopla\w+)\b"),
+        ("inflammation_lymphocytes", r"\b(?:inflamm\w+|lymphocyt\w+)\b"),
+        ("keratin", r"\bkeratin\w*\b|\bintercellular\s+bridges\b"),
+        ("mucin_mucus", r"\b(?:mucin\w*|mucus|mucinous)\b"),
+        ("calcification", r"\b(?:calcification\w*|microcalcification\w*|psammoma\w*)\b"),
+        # Invasion, margins, lymph nodes & TNM staging
+        ("lymphovascular_invasion", r"\b(?:lymphovascular|angiolymphatic|vascular|lymphatic|venous)\s+(?:space\s+)?invasion\b"),
+        ("perineural_invasion", r"\bperineural\s+invasion\b"),
+        ("surgical_margins", r"\bmargins?\b"),
+        ("lymph_nodes", r"\blymph\s+nodes?\b|\bpn[0-3x]\b"),
+        ("tnm_stage_t", r"\bpt[1-4][a-c]?\b"),
+        # Immunohistochemistry biomarkers
+        ("biomarker_er", r"\b(?:er\b|estrogen\s+receptor)"),
+        ("biomarker_pr", r"\b(?:pr\b|progesterone\s+receptor)"),
+        ("biomarker_her2", r"\bher2\b"),
+        ("biomarker_ki67", r"\bki[\s\-]?67\b"),
+        ("biomarker_ck_p63", r"\b(?:ck\d+|cytokeratin|p63|calponin|e[\s\-]?cadherin)\b"),
+    )
+)
 
 
 def tokenize_report(text: str) -> List[str]:
-    """Tokenize a clinical pathology report into normalized lowercase words.
+    """Tokenize a clinical pathology report into normalized lowercase alphanumeric words.
 
-    Preserves alphanumeric clinical markers (e.g., 'her2+', 'g3', 'ck14', 't2n0m0').
+    Normalizes unicode superscripts (e.g., `'mm²'` -> `'mm2'`) and extracts lowercase
+    alphanumeric tokens (e.g., `'her2'`, `'g3'`, `'ck14'`, `'pt2a'`).
 
     Args:
         text: Raw caption or pathology report string.
@@ -31,7 +131,8 @@ def tokenize_report(text: str) -> List[str]:
     """
     if not text:
         return []
-    return _TOKEN_PATTERN.findall(text.lower())
+    normalized = text.lower().replace("²", "2").replace("³", "3")
+    return _TOKEN_PATTERN.findall(normalized)
 
 
 def _extract_ngrams(tokens: Sequence[str], n: int) -> Counter:
@@ -43,7 +144,10 @@ def _extract_ngrams(tokens: Sequence[str], n: int) -> Counter:
 
 
 def _light_stem(word: str) -> str:
-    """Apply lightweight morphological suffix stripping for METEOR stem matching."""
+    """Apply clinical and morphological suffix stripping for METEOR stem matching."""
+    override = _CLINICAL_STEM_OVERRIDES.get(word)
+    if override is not None:
+        return override
     if len(word) <= 4:
         return word
     for suffix in (
@@ -72,10 +176,65 @@ def _light_stem(word: str) -> str:
         if word.endswith(suffix) and len(word) - len(suffix) >= 3:
             if suffix in ("carcinomas", "adenocarcinomas"):
                 return word[:-1]
+            if suffix in ("ations", "ation"):
+                return word[: -len(suffix)] + "at"
             if suffix == "ies":
                 return word[:-3] + "y"
             return word[: -len(suffix)]
     return word
+
+
+def extract_clinical_concepts(text: str) -> Set[str]:
+    """Extract canonical histopathological concepts mentioned in a pathology report.
+
+    Args:
+        text: Raw pathology report or caption string.
+
+    Returns:
+        Set of matched clinical concept identifiers.
+    """
+    if not text or not text.strip():
+        return set()
+    return {
+        name for name, pattern in _CLINICAL_CONCEPT_PATTERNS if pattern.search(text)
+    }
+
+
+def compute_clinical_concept_scores(
+    prediction: str, reference: str
+) -> Dict[str, float]:
+    """Compute clinical entity Precision, Recall, and F1 between candidate and reference reports.
+
+    Args:
+        prediction: Model-generated pathology report string.
+        reference: Ground-truth reference pathology report string.
+
+    Returns:
+        Dictionary with `'clinical_precision'`, `'clinical_recall'`, and `'clinical_f1'` in `[0.0, 1.0]`.
+    """
+    pred_concepts = extract_clinical_concepts(prediction)
+    ref_concepts = extract_clinical_concepts(reference)
+    if not ref_concepts and not pred_concepts:
+        return {
+            "clinical_precision": 1.0,
+            "clinical_recall": 1.0,
+            "clinical_f1": 1.0,
+        }
+    if not pred_concepts or not ref_concepts:
+        return {
+            "clinical_precision": 0.0,
+            "clinical_recall": 0.0,
+            "clinical_f1": 0.0,
+        }
+    overlap = len(pred_concepts & ref_concepts)
+    prec = overlap / len(pred_concepts)
+    rec = overlap / len(ref_concepts)
+    f1 = (2.0 * prec * rec / (prec + rec)) if (prec + rec) > 0 else 0.0
+    return {
+        "clinical_precision": prec,
+        "clinical_recall": rec,
+        "clinical_f1": f1,
+    }
 
 
 def compute_sentence_bleu(
@@ -345,14 +504,20 @@ def compute_corpus_cider(
     tokenized_refs: Sequence[Sequence[str]],
     max_n: int = 4,
     sigma: float = 6.0,
+    apply_length_penalty: bool = False,
 ) -> Tuple[float, List[float]]:
-    """Compute CIDEr-D across a corpus of candidate and reference reports (Vedantam et al., CVPR 2015).
+    """Compute CIDEr across a corpus of candidate and reference reports (Vedantam et al., CVPR 2015).
+
+    By default computes standard TF-IDF cosine similarity across 1..4-grams (`pycocoevalcap` CIDEr)
+    with smoothed document-frequency normalization `log((N + 1) / df)` so multi-paragraph
+    pathology reports are not zeroed out by MS-COCO's 6-word Gaussian length penalty.
 
     Args:
         tokenized_preds: Sequence of tokenized candidate reports.
         tokenized_refs: Sequence of tokenized ground-truth reference reports.
         max_n: Maximum n-gram order (default: 4).
-        sigma: Gaussian length-penalty standard deviation (default: 6.0).
+        sigma: Gaussian length-penalty standard deviation when `apply_length_penalty=True`.
+        apply_length_penalty: If True, apply CIDEr-D clipping and Gaussian length penalty.
 
     Returns:
         Tuple of `(mean_cider_score, per_sample_cider_scores)` scaled by 10.0 (standard CIDEr scale).
@@ -361,7 +526,7 @@ def compute_corpus_cider(
     if num_samples == 0:
         return 0.0, []
 
-    ref_len_log = math.log(max(1.0, float(num_samples)))
+    ref_len_log = math.log(float(num_samples) + 1.0)
     doc_freqs: List[Counter] = [Counter() for _ in range(max_n)]
     pred_ngram_bags: List[List[Counter]] = []
     ref_ngram_bags: List[List[Counter]] = []
@@ -387,8 +552,11 @@ def compute_corpus_cider(
             per_sample_scores.append(0.0)
             continue
 
-        delta_len = len(pred_toks) - len(ref_toks)
-        len_penalty = math.exp(-(delta_len ** 2) / (2.0 * (sigma ** 2)))
+        if apply_length_penalty:
+            delta_len = len(pred_toks) - len(ref_toks)
+            len_penalty = math.exp(-(delta_len ** 2) / (2.0 * (sigma ** 2)))
+        else:
+            len_penalty = 1.0
 
         n_sims: List[float] = []
         for n_idx in range(max_n):
@@ -406,9 +574,8 @@ def compute_corpus_cider(
 
             for ng, cnt in p_c.items():
                 idf = max(0.0, ref_len_log - math.log(max(1, df_n.get(ng, 1))))
-                # CIDEr-D clips candidate count at reference count in the numerator
-                clipped_cnt = min(cnt, r_c.get(ng, 0))
-                p_weights[ng] = (clipped_cnt / p_total) * idf
+                eff_cnt = min(cnt, r_c.get(ng, 0)) if apply_length_penalty else cnt
+                p_weights[ng] = (eff_cnt / p_total) * idf
 
             p_norm_sq = 0.0
             for ng, cnt in p_c.items():
@@ -464,7 +631,8 @@ def compute_bertscore_batch(
 
     Returns:
         Dictionary containing `'precision'`, `'recall'`, `'f1'` (macro averages) and
-        `'per_sample_f1'`, or `None` if `torch`/`transformers` or the model weights are unavailable.
+        `'per_sample_precision'`, `'per_sample_recall'`, `'per_sample_f1'`, or `None`
+        if `torch`/`transformers` or the model weights are unavailable.
     """
     if not predictions or not references:
         return None
@@ -559,12 +727,14 @@ def compute_bertscore_batch(
         "precision": round(sum(precisions) / n, 4),
         "recall": round(sum(recalls) / n, 4),
         "f1": round(sum(f1s) / n, 4),
+        "per_sample_precision": [round(val, 4) for val in precisions],
+        "per_sample_recall": [round(val, 4) for val in recalls],
         "per_sample_f1": [round(val, 4) for val in f1s],
     }
 
 
 def compute_sample_lexical_metrics(prediction: str, reference: str) -> Dict[str, float]:
-    """Compute per-sample lexical captioning metrics for incremental `.jsonl` logging.
+    """Compute per-sample lexical and clinical captioning metrics for incremental `.jsonl` logging.
 
     Args:
         prediction: Model-generated pathology report / caption string.
@@ -572,6 +742,7 @@ def compute_sample_lexical_metrics(prediction: str, reference: str) -> Dict[str,
 
     Returns:
         Dictionary with `bleu_1..4`, `rouge_1`, `rouge_2`, `rouge_l`, `meteor`,
+        `clinical_precision`, `clinical_recall`, `clinical_f1`,
         `pred_word_count`, and `ref_word_count`.
     """
     pred_tokens = tokenize_report(prediction)
@@ -580,6 +751,7 @@ def compute_sample_lexical_metrics(prediction: str, reference: str) -> Dict[str,
     bleu = compute_sentence_bleu(pred_tokens, ref_tokens)
     rouge = compute_rouge_scores(pred_tokens, ref_tokens)
     meteor = compute_meteor_score(pred_tokens, ref_tokens)
+    clinical = compute_clinical_concept_scores(prediction, reference)
 
     return {
         "bleu_1": round(bleu["bleu_1"], 4),
@@ -590,6 +762,9 @@ def compute_sample_lexical_metrics(prediction: str, reference: str) -> Dict[str,
         "rouge_2": round(rouge["rouge_2"], 4),
         "rouge_l": round(rouge["rouge_l"], 4),
         "meteor": round(meteor, 4),
+        "clinical_precision": round(clinical["clinical_precision"], 4),
+        "clinical_recall": round(clinical["clinical_recall"], 4),
+        "clinical_f1": round(clinical["clinical_f1"], 4),
         "pred_word_count": len(pred_tokens),
         "ref_word_count": len(ref_tokens),
     }
@@ -611,34 +786,36 @@ def _aggregate_group_records(group_records: Sequence[Dict[str, Any]]) -> Dict[st
 
     empty_count = sum(1 for t in tok_preds if len(t) == 0)
     corpus_bleu = compute_corpus_bleu(tok_preds, tok_refs)
-    mean_cider, _ = compute_corpus_cider(tok_preds, tok_refs)
 
+    cider_vals = [
+        float(r["cider"]) for r in group_records if r.get("cider") is not None
+    ]
+    if len(cider_vals) == count:
+        mean_cider = sum(cider_vals) / count
+    else:
+        mean_cider, _ = compute_corpus_cider(tok_preds, tok_refs)
+
+    metric_keys = (
+        "bleu_1",
+        "bleu_2",
+        "bleu_3",
+        "bleu_4",
+        "rouge_1",
+        "rouge_2",
+        "rouge_l",
+        "meteor",
+        "clinical_precision",
+        "clinical_recall",
+        "clinical_f1",
+    )
     sum_metrics = Counter()
     for idx, rec in enumerate(group_records):
-        if "bleu_1" in rec and "rouge_l" in rec and "meteor" in rec:
-            for k in (
-                "bleu_1",
-                "bleu_2",
-                "bleu_3",
-                "bleu_4",
-                "rouge_1",
-                "rouge_2",
-                "rouge_l",
-                "meteor",
-            ):
+        if all(k in rec for k in metric_keys):
+            for k in metric_keys:
                 sum_metrics[k] += float(rec.get(k, 0.0))
         else:
             s_metrics = compute_sample_lexical_metrics(preds[idx], refs[idx])
-            for k in (
-                "bleu_1",
-                "bleu_2",
-                "bleu_3",
-                "bleu_4",
-                "rouge_1",
-                "rouge_2",
-                "rouge_l",
-                "meteor",
-            ):
+            for k in metric_keys:
                 sum_metrics[k] += s_metrics[k]
 
     summary: Dict[str, Any] = {
@@ -657,17 +834,21 @@ def _aggregate_group_records(group_records: Sequence[Dict[str, Any]]) -> Dict[st
         "rouge_l": round(sum_metrics["rouge_l"] / count, 4),
         "meteor": round(sum_metrics["meteor"] / count, 4),
         "cider": round(mean_cider, 4),
+        "clinical_precision": round(sum_metrics["clinical_precision"] / count, 4),
+        "clinical_recall": round(sum_metrics["clinical_recall"] / count, 4),
+        "clinical_f1": round(sum_metrics["clinical_f1"] / count, 4),
         "avg_pred_words": round(sum(len(t) for t in tok_preds) / count, 1),
         "avg_ref_words": round(sum(len(t) for t in tok_refs) / count, 1),
     }
 
-    bert_f1_vals = [
-        float(r["bertscore_f1"])
-        for r in group_records
-        if r.get("bertscore_f1") is not None
-    ]
-    if bert_f1_vals:
-        summary["bertscore_f1"] = round(sum(bert_f1_vals) / len(bert_f1_vals), 4)
+    for bert_key in ("bertscore_precision", "bertscore_recall", "bertscore_f1"):
+        vals = [
+            float(r[bert_key])
+            for r in group_records
+            if r.get(bert_key) is not None
+        ]
+        if vals:
+            summary[bert_key] = round(sum(vals) / len(vals), 4)
 
     return summary
 
@@ -692,12 +873,20 @@ def compute_caption_metrics(
     if not records:
         return {"total_samples": 0}
 
+    preds = [str(r.get("raw_output", "") or "") for r in records]
+    refs = [
+        str(r.get("reference_caption") or r.get("answer_text") or "")
+        for r in records
+    ]
+    tok_preds = [tokenize_report(p) for p in preds]
+    tok_refs = [tokenize_report(r) for r in refs]
+
+    _, per_sample_cider = compute_corpus_cider(tok_preds, tok_refs)
+    for rec, cider_val in zip(records, per_sample_cider):
+        if isinstance(rec, dict):
+            rec["cider"] = round(cider_val, 4)
+
     if compute_bertscore:
-        preds = [str(r.get("raw_output", "") or "") for r in records]
-        refs = [
-            str(r.get("reference_caption") or r.get("answer_text") or "")
-            for r in records
-        ]
         bert_res = compute_bertscore_batch(
             predictions=preds,
             references=refs,
@@ -705,8 +894,15 @@ def compute_caption_metrics(
             device=device,
         )
         if bert_res is not None:
-            for rec, f1_val in zip(records, bert_res["per_sample_f1"]):
+            for rec, p_val, r_val, f1_val in zip(
+                records,
+                bert_res["per_sample_precision"],
+                bert_res["per_sample_recall"],
+                bert_res["per_sample_f1"],
+            ):
                 if isinstance(rec, dict):
+                    rec["bertscore_precision"] = p_val
+                    rec["bertscore_recall"] = r_val
                     rec["bertscore_f1"] = f1_val
 
     overall = _aggregate_group_records(records)
