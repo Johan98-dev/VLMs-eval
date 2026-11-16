@@ -189,4 +189,26 @@ Run [`scripts/run_vqa_eval.py`](./scripts/run_vqa_eval.py) to evaluate `SlideCha
 .venv/bin/python scripts/run_vqa_eval.py --model prism2 --cohorts BCNB CPTAC --limit 0
 ```
 
+See the complete Stage 1 benchmark report in [`docs/STAGE1_VQA_RESULTS.md`](./docs/STAGE1_VQA_RESULTS.md) and consolidated summary table in [`results/stage1_vqa/stage1_vqa_consolidated_summary.csv`](./results/stage1_vqa/stage1_vqa_consolidated_summary.csv).
+
+---
+
+## Stage 2 — Open-Ended WSI Captioning & Pathology Report Generation
+
+Run [`scripts/run_caption_eval.py`](./scripts/run_caption_eval.py) to evaluate `SlideChat`, `PRISM2`, and `MLLM-HWSI` on open-ended pathology report generation across `TCGA`, `CPTAC`, and `Histai` (`BLEU-1..4`, `ROUGE-1/2/L`, `METEOR`, `CIDEr`, and `Clinical Concept Precision/Recall/F1`):
+
+```bash
+# Evaluate on CPTAC (38 slides), TCGA Stratified (152 slides), or Histai (1,145 slides)
+.venv/bin/python scripts/run_caption_eval.py --model slidechat --cohorts CPTAC --limit 0
+.venv/bin/python scripts/run_caption_eval.py --model prism2    --cohorts TCGA  --limit 0
+.venv/bin/python scripts/run_caption_eval.py --model mllm-hwsi --cohorts Histai --limit 0
+
+# Evaluate on the held-out deduplicated TCGA Unseen subset (151 slides across 25 tumors)
+.venv/bin/python scripts/run_caption_eval.py --model slidechat --cohorts TCGA \
+    --caption-csv SlideBench-Caption-TCGA-unseen-mllm.csv --limit 0
+```
+
+See the complete Stage 2 benchmark report in [`docs/STAGE2_CAPTION_RESULTS.md`](./docs/STAGE2_CAPTION_RESULTS.md) and consolidated summary table in [`results/stage2_caption/stage2_caption_consolidated_summary.csv`](./results/stage2_caption/stage2_caption_consolidated_summary.csv).
+
+
 
