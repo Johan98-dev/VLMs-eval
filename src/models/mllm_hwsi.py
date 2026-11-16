@@ -416,6 +416,19 @@ class MLLMHWSIAdapter(BaseWSIVLM):
         )
         attention_mask = torch.cat([prefix_attention_mask, text_attention_mask], dim=1)
 
+        eos_token_ids: list[int] = []
+        gen_cfg_eos = getattr(self.llm.generation_config, "eos_token_id", None)
+        if isinstance(gen_cfg_eos, int):
+            eos_token_ids.append(gen_cfg_eos)
+        elif isinstance(gen_cfg_eos, (list, tuple)):
+            eos_token_ids.extend(int(t) for t in gen_cfg_eos)
+        if isinstance(self.tokenizer.eos_token_id, int) and self.tokenizer.eos_token_id not in eos_token_ids:
+            eos_token_ids.append(self.tokenizer.eos_token_id)
+        for special_tok in ("<|im_end|>", "<|endoftext|>"):
+            tok_id = self.tokenizer.convert_tokens_to_ids(special_tok)
+            if isinstance(tok_id, int) and tok_id >= 0 and tok_id not in eos_token_ids:
+                eos_token_ids.append(tok_id)
+
         generated_ids = self.llm.generate(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
@@ -423,7 +436,7 @@ class MLLMHWSIAdapter(BaseWSIVLM):
             do_sample=False,
             num_beams=1,
             pad_token_id=self.tokenizer.pad_token_id,
-            eos_token_id=self.tokenizer.eos_token_id,
+            eos_token_id=eos_token_ids or self.tokenizer.eos_token_id,
         )
         return self.tokenizer.decode(generated_ids[0], skip_special_tokens=True).strip()
 

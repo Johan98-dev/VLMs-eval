@@ -19,7 +19,8 @@ env/
 *.pth
 *.onnx
 *.h5
-/results/
+/results/analysis/
+/results/annotations/
 
 # Logs y métricas de entrenamiento/evaluación
 wandb/
