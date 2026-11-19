@@ -667,12 +667,19 @@ class ConchVisualEncoder(nn.Module):
             ]
         )
 
-    def encode_image(self, x: torch.Tensor, normalize: bool = True) -> torch.Tensor:
+    def encode_image(
+        self,
+        x: torch.Tensor,
+        normalize: bool = True,
+        proj_contrast: bool = True,
+    ) -> torch.Tensor:
         tokens = self.trunk.forward_features(x)
         q = self.ln_q(self.query).unsqueeze(0).expand(x.shape[0], -1, -1)
         k = self.ln_k(tokens)
         pooled, _ = self.attn(q, k, k, need_weights=False)
-        out = self.ln_contrast(pooled.squeeze(1)) @ self.proj_contrast
+        out = self.ln_contrast(pooled.squeeze(1))
+        if proj_contrast:
+            out = out @ self.proj_contrast
         if normalize:
             out = F.normalize(out, dim=-1)
         return out
@@ -1065,3 +1072,403 @@ class SlideChatConchFeatureExtractor:
         torch.save(patch_features, tmp_path)
         tmp_path.replace(out_path)
         return out_path
+
+
+# ---------------------------------------------------------------------------
+# 4. ALPaCA On-Demand 3-Scale CONCH + GMM Feature Extractor
+# ---------------------------------------------------------------------------
+
+ALPACA_SCALE_ORDER: Tuple[str, ...] = ("0_1024", "1_512", "1_1024")
+ALPACA_SCALE_TO_GMM_KEY: Dict[str, str] = {
+    "0_1024": "f1024",
+    "1_512": "f2048",
+    "1_1024": "f4096",
+}
+ALPACA_SCALE_TO_RES_CLUSTERS: Dict[str, Tuple[int, int]] = {
+    "0_1024": (1024, 256),
+    "1_512": (2048, 128),
+    "1_1024": (4096, 64),
+}
+
+
+def load_alpaca_prototype_matrices(proto_root: Path) -> Dict[str, np.ndarray]:
+    """Load the 3 multi-scale CONCH GMM prototype matrices (256/128/64 x 512) from `proto_root`."""
+    import pickle
+
+    proto_dir = proto_root / "prototypes" if (proto_root / "prototypes").is_dir() else proto_root
+    matrices: Dict[str, np.ndarray] = {}
+    for scale, (res_tok, n_clusters) in ALPACA_SCALE_TO_RES_CLUSTERS.items():
+        exact = proto_dir / f"prototypes_c{n_clusters}_kmeans_num_1.0e+05_{res_tok}_conch.pkl"
+        if not exact.is_file():
+            matches = sorted(proto_dir.rglob(f"prototypes_c{n_clusters}_*_{res_tok}_*conch*.pkl"))
+            if not matches:
+                raise FileNotFoundError(
+                    f"Missing ALPaCA CONCH prototype PKL for scale {scale} (c={n_clusters}, res={res_tok}) under {proto_root}"
+                )
+            exact = matches[0]
+        with exact.open("rb") as handle:
+            obj = pickle.load(handle)
+        mat = np.asarray(obj["prototypes"] if isinstance(obj, dict) and "prototypes" in obj else obj)
+        if mat.ndim == 3 and mat.shape[0] == 1:
+            mat = mat[0]
+        matrices[scale] = mat.astype(np.float32)
+    return matrices
+
+
+def soft_assign_gmm_tokens(
+    features: np.ndarray,
+    prototypes: np.ndarray,
+    tau: float = 1.0,
+    batch_size: int = 4096,
+) -> np.ndarray:
+    """Compute ALPaCA GMM prototype tokens `[prob | mean | cov]` of shape `(P, 1 + 2*D)`.
+
+    Matches `GMM_feature_extraction/src/wsi_single_demo.py:soft_assign_and_tokenize(..., flatten=False)`.
+    """
+    x_arr = np.asarray(features, dtype=np.float32)
+    c_arr = np.asarray(prototypes, dtype=np.float32)
+    if x_arr.ndim == 3 and x_arr.shape[0] == 1:
+        x_arr = x_arr[0]
+    n_samples, dim = x_arr.shape
+    n_protos, proto_dim = c_arr.shape
+    if dim != proto_dim:
+        raise ValueError(f"Feature dim {dim} != prototype dim {proto_dim}")
+
+    accum: Optional[np.ndarray] = None
+    count = 0
+    for start in range(0, n_samples, batch_size):
+        end = min(start + batch_size, n_samples)
+        x_chunk = x_arr[start:end]  # (n, D)
+        delta = x_chunk[:, None, :] - c_arr[None, :, :]  # (n, P, D)
+        d2 = (delta ** 2).sum(axis=2)  # (n, P)
+
+        logits = -d2 / max(tau, 1e-8)
+        logits = logits - logits.max(axis=1, keepdims=True)
+        r = np.exp(logits)
+        r = r / (r.sum(axis=1, keepdims=True) + 1e-12)  # (n, P)
+
+        mean = r[:, :, None] * delta  # (n, P, D)
+        cov = r[:, :, None] * (delta ** 2)  # (n, P, D)
+
+        pmc_chunk = np.concatenate(
+            [
+                r[:, :, None].astype(np.float32),
+                mean.astype(np.float32),
+                cov.astype(np.float32),
+            ],
+            axis=2,
+        )  # (n, P, 1 + 2*D)
+        chunk_sum = pmc_chunk.sum(axis=0)  # (P, 1 + 2*D)
+        accum = chunk_sum if accum is None else (accum + chunk_sum)
+        count += end - start
+
+    assert accum is not None
+    return (accum / max(count, 1)).astype(np.float32)
+
+
+def find_alpaca_reference_scale_files(
+    sample_features_dir: Path, slide_id: str
+) -> Optional[Dict[str, Path]]:
+    """Locate official pre-extracted 3-scale CONCH `.npy` files if `slide_id` is in `sample_features`."""
+    if not sample_features_dir.is_dir():
+        return None
+    found: Dict[str, Path] = {}
+    for scale in ALPACA_SCALE_ORDER:
+        matches: List[Path] = []
+        for pattern in (f"{slide_id}_{scale}.npy", f"{slide_id}.*_{scale}.npy", f"{slide_id}*_{scale}.npy"):
+            direct = sample_features_dir / pattern
+            if direct.is_file():
+                matches = [direct]
+                break
+            globbed = sorted(sample_features_dir.rglob(pattern))
+            if globbed:
+                matches = globbed
+                break
+        if not matches:
+            return None
+        found[scale] = matches[0]
+    return found
+
+
+def load_alpaca_conch_npy(npy_path: Path, max_patches: int = 15000) -> Tuple[np.ndarray, np.ndarray]:
+    """Load `(feature [N, 512] float32, coords [N, 2] int64)` from an ALPaCA CONCH `.npy` file."""
+    raw = np.load(npy_path, allow_pickle=True)
+    if isinstance(raw, np.ndarray) and raw.shape == () and isinstance(raw.item(), dict):
+        blob = raw.item()
+        feat_obj = blob["feature"]
+        if torch.is_tensor(feat_obj):
+            feat = feat_obj.detach().cpu().numpy().astype(np.float32)
+        else:
+            feat = np.asarray(feat_obj, dtype=np.float32)
+        idx_list = blob.get("index", [])
+        if idx_list:
+            coords = np.array([str(s).split("_")[:2] for s in idx_list], dtype=np.int64)
+        else:
+            coords = np.zeros((feat.shape[0], 2), dtype=np.int64)
+    else:
+        feat = np.asarray(raw, dtype=np.float32)
+        coords = np.zeros((feat.shape[0], 2), dtype=np.int64)
+
+    if feat.ndim == 3 and feat.shape[0] == 1:
+        feat = feat[0]
+    if max_patches > 0 and feat.shape[0] > max_patches:
+        feat = feat[:max_patches, :]
+        coords = coords[:max_patches, :]
+    return feat, coords
+
+
+class ALPaCAConchFeatureExtractor:
+    """Extracts and caches 3-scale CONCH (`0_1024`, `1_512`, `1_1024`) + GMM prototype features for ALPaCA."""
+
+    def __init__(self, paths: Optional[ProjectPaths] = None, device: str = "cuda:0") -> None:
+        self.paths = paths or ProjectPaths()
+        self.device = torch.device(device if torch.cuda.is_available() else "cpu")
+        self._conch: Optional[ConchVisualEncoder] = None
+        self._prototypes: Optional[Dict[str, np.ndarray]] = None
+
+    @property
+    def conch(self) -> ConchVisualEncoder:
+        """Lazy-load CONCH visual encoder onto `self.device` when WSI extraction is needed."""
+        if self._conch is None:
+            self._conch = (
+                ConchVisualEncoder(self.paths.conch_dir / "pytorch_model.bin")
+                .eval()
+                .to(self.device)
+            )
+        return self._conch
+
+    @property
+    def prototypes(self) -> Dict[str, np.ndarray]:
+        """Lazy-load the 3 multi-scale CONCH prototype matrices (256/128/64)."""
+        if self._prototypes is None:
+            self._prototypes = load_alpaca_prototype_matrices(self.paths.alpaca_proto_dir)
+        return self._prototypes
+
+    def _encode_pil_list(self, crops: List[Image.Image], batch_size: int = 64) -> np.ndarray:
+        """Encode a list of PIL images into ALPaCA `ln_contrast` CONCH space (`proj_contrast=False, normalize=False`)."""
+        if not crops:
+            return np.zeros((1, 512), dtype=np.float32)
+        tensors = [self.conch.preprocess(img) for img in crops]
+        chunks: List[np.ndarray] = []
+        use_amp = self.device.type == "cuda"
+        for i in range(0, len(tensors), batch_size):
+            batch = torch.stack(tensors[i : i + batch_size], dim=0).to(self.device)
+            with torch.amp.autocast(
+                device_type=self.device.type, dtype=torch.float16, enabled=use_amp
+            ):
+                # CLAM_PreProcessing CONCH uses proj_contrast=False, normalize=False (ln_contrast output)
+                out = self.conch.encode_image(batch, normalize=False, proj_contrast=False)
+            chunks.append(out.detach().float().cpu().numpy())
+        return np.concatenate(chunks, axis=0)
+
+    def _extract_three_scales_from_wsi(
+        self,
+        wsi_path: Path,
+        feature_csv_path: Optional[Path] = None,
+        max_regions_4k: int = 24,
+        batch_size: int = 64,
+    ) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
+        """Extract `0_1024` (1024px @ 40x), `1_512` (2048px @ 40x), and `1_1024` (4096px @ 40x) CONCH features."""
+        with WSIReader(wsi_path) as reader:
+            w, h = reader.size
+
+        # Small ROI slides (e.g., BCNB .jpg where dimensions < 2048): use multi-scale 256 / 512 / 1024 crops
+        if max(w, h) < 2048:
+            coords_fine = discover_tissue_patch_coords_256(
+                wsi_path, feature_csv_path=feature_csv_path, max_patches=256
+            )
+            seen_mid = set()
+            coords_mid: List[Tuple[int, int]] = []
+            seen_coarse = set()
+            coords_coarse: List[Tuple[int, int]] = []
+            for x, y in coords_fine:
+                mx, my = (x // 512) * 512, (y // 512) * 512
+                if (mx, my) not in seen_mid:
+                    seen_mid.add((mx, my))
+                    coords_mid.append((mx, my))
+                cx, cy = (x // 1024) * 1024, (y // 1024) * 1024
+                if (cx, cy) not in seen_coarse:
+                    seen_coarse.add((cx, cy))
+                    coords_coarse.append((cx, cy))
+
+            with WSIReader(wsi_path) as reader:
+                crops_0 = [reader.crop(x, y, 256) for x, y in coords_fine]
+                crops_1 = [reader.crop(x, y, 512) for x, y in coords_mid]
+                crops_2 = [reader.crop(x, y, 1024) for x, y in coords_coarse]
+
+            f0 = self._encode_pil_list(crops_0, batch_size=batch_size)
+            f1 = self._encode_pil_list(crops_1, batch_size=batch_size)
+            f2 = self._encode_pil_list(crops_2, batch_size=batch_size)
+
+            # Map local coordinates to LongNet's 1024 / 2048 / 4096 grid units
+            c0 = np.array([((x // 256) * 1024 + 1, (y // 256) * 1024 + 1) for x, y in coords_fine], dtype=np.int64)
+            c1 = np.array([((x // 512) * 2048 + 1, (y // 512) * 2048 + 1) for x, y in coords_mid], dtype=np.int64)
+            c2 = np.array([((x // 1024) * 4096 + 1, (y // 1024) * 4096 + 1) for x, y in coords_coarse], dtype=np.int64)
+            return {
+                "0_1024": (f0, c0),
+                "1_512": (f1, c1),
+                "1_1024": (f2, c2),
+            }
+
+        # Standard pyramidal / whole-slide images (CPTAC, TCGA, Histai, large BCNB):
+        region_coords = discover_region_coords_4096(
+            wsi_path, region_size=4096, max_regions=max_regions_4k
+        )
+        with WSIReader(wsi_path) as reader:
+            reg_imgs = reader.crop_many(region_coords, 4096)
+
+        crops_0: List[Image.Image] = []
+        coords_0: List[Tuple[int, int]] = []
+        crops_1: List[Image.Image] = []
+        coords_1: List[Tuple[int, int]] = []
+        crops_2: List[Image.Image] = []
+        coords_2: List[Tuple[int, int]] = []
+
+        for (rx, ry), reg_img in zip(region_coords, reg_imgs):
+            reg_np = np.asarray(reg_img)
+            # Scale 2 (1_1024): 4096x4096 at 40x -> 1024x1024 at 20x
+            crops_2.append(
+                reg_img.resize((1024, 1024), resample=Image.Resampling.BILINEAR)
+            )
+            coords_2.append((rx + 1, ry + 1))
+
+            # Scale 1 (1_512): 2x2 quadrants of 2048x2048 at 40x -> 512x512 at 20x
+            added_q = 0
+            best_q_score = -1.0
+            best_q_item: Optional[Tuple[Image.Image, Tuple[int, int]]] = None
+            for qy in range(2):
+                for qx in range(2):
+                    ox, oy = qx * 2048, qy * 2048
+                    sub_np = reg_np[oy : oy + 2048 : 8, ox : ox + 2048 : 8]
+                    sat = float((sub_np.max(axis=-1).astype(np.float32) - sub_np.min(axis=-1).astype(np.float32)).mean())
+                    gray = float(sub_np.mean())
+                    q_crop = reg_img.crop((ox, oy, ox + 2048, oy + 2048)).resize(
+                        (512, 512), resample=Image.Resampling.BILINEAR
+                    )
+                    q_coord = (rx + ox + 1, ry + oy + 1)
+                    if sat > best_q_score:
+                        best_q_score = sat
+                        best_q_item = (q_crop, q_coord)
+                    if sat > 10.0 and 25.0 < gray < 242.0:
+                        crops_1.append(q_crop)
+                        coords_1.append(q_coord)
+                        added_q += 1
+            if added_q == 0 and best_q_item is not None:
+                crops_1.append(best_q_item[0])
+                coords_1.append(best_q_item[1])
+
+            # Scale 0 (0_1024): 4x4 sub-tiles of 1024x1024 at 40x
+            added_s = 0
+            best_s_score = -1.0
+            best_s_item: Optional[Tuple[Image.Image, Tuple[int, int]]] = None
+            for sy in range(4):
+                for sx in range(4):
+                    ox, oy = sx * 1024, sy * 1024
+                    sub_np = reg_np[oy : oy + 1024 : 8, ox : ox + 1024 : 8]
+                    sat = float((sub_np.max(axis=-1).astype(np.float32) - sub_np.min(axis=-1).astype(np.float32)).mean())
+                    gray = float(sub_np.mean())
+                    s_crop = reg_img.crop((ox, oy, ox + 1024, oy + 1024))
+                    s_coord = (rx + ox + 1, ry + oy + 1)
+                    if sat > best_s_score:
+                        best_s_score = sat
+                        best_s_item = (s_crop, s_coord)
+                    if sat > 10.0 and 25.0 < gray < 242.0:
+                        crops_0.append(s_crop)
+                        coords_0.append(s_coord)
+                        added_s += 1
+            if added_s == 0 and best_s_item is not None:
+                crops_0.append(best_s_item[0])
+                coords_0.append(best_s_item[1])
+
+        f0 = self._encode_pil_list(crops_0, batch_size=batch_size)
+        f1 = self._encode_pil_list(crops_1, batch_size=batch_size)
+        f2 = self._encode_pil_list(crops_2, batch_size=batch_size)
+        return {
+            "0_1024": (f0, np.asarray(coords_0, dtype=np.int64)),
+            "1_512": (f1, np.asarray(coords_1, dtype=np.int64)),
+            "1_1024": (f2, np.asarray(coords_2, dtype=np.int64)),
+        }
+
+    @torch.inference_mode()
+    def extract_or_load(
+        self,
+        slide_id: str,
+        cohort: str,
+        wsi_path: Optional[Path] = None,
+        feature_path: Optional[Path] = None,
+        tau: float = 1.0,
+    ) -> Dict[str, Any]:
+        """Return cached or freshly extracted 3-scale `longnet` + `gmm` tensors for `slide_id`."""
+        safe_stem = slide_id.replace("/", "_")
+        if wsi_path is not None:
+            safe_stem = wsi_cache_stem(wsi_path, cohort)
+
+        out_dir = self.paths.datasets_dir / cohort / "Feat" / "ALPaCA_CONCH"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{safe_stem}.pt"
+        if out_path.is_file():
+            return torch.load(out_path, map_location="cpu", weights_only=False)
+
+        # 1. Check official 40-slide reference features first (Double Validation parity)
+        ref_files = find_alpaca_reference_scale_files(self.paths.alpaca_sample_features_dir, slide_id)
+        if ref_files is not None:
+            scales_data = {
+                scale: load_alpaca_conch_npy(npy_p, max_patches=15000)
+                for scale, npy_p in ref_files.items()
+            }
+        elif wsi_path is not None and wsi_path.is_file():
+            scales_data = self._extract_three_scales_from_wsi(
+                wsi_path=wsi_path,
+                feature_csv_path=feature_path if (feature_path and feature_path.suffix == ".csv") else None,
+            )
+        elif feature_path is not None and feature_path.is_file():
+            # Fallback when only 1-scale 512-d CONCH features exist on disk
+            from src.datasets.slidebench_vqa import load_patch_features_csv
+
+            base_t = load_patch_features_csv(feature_path, max_patches=4096).squeeze(0).numpy().astype(np.float32)
+            # Match CONCH ln_contrast norm (~22.668) if unit-normalized
+            norms = np.linalg.norm(base_t, axis=-1, keepdims=True)
+            if float(norms.mean()) < 5.0:
+                base_t = base_t * (22.6684 / np.maximum(norms, 1e-6))
+            n0 = base_t.shape[0]
+            c0 = np.stack([(np.arange(n0) % 32) * 1024 + 1, (np.arange(n0) // 32) * 1024 + 1], axis=-1).astype(np.int64)
+            f1 = base_t[::2] if n0 >= 2 else base_t
+            n1 = f1.shape[0]
+            c1 = np.stack([(np.arange(n1) % 16) * 2048 + 1, (np.arange(n1) // 16) * 2048 + 1], axis=-1).astype(np.int64)
+            f2 = base_t[::4] if n0 >= 4 else base_t
+            n2 = f2.shape[0]
+            c2 = np.stack([(np.arange(n2) % 8) * 4096 + 1, (np.arange(n2) // 8) * 4096 + 1], axis=-1).astype(np.int64)
+            scales_data = {
+                "0_1024": (base_t, c0),
+                "1_512": (f1, c1),
+                "1_1024": (f2, c2),
+            }
+        else:
+            raise FileNotFoundError(
+                f"ALPaCA requires either reference sample_features, a local WSI ({wsi_path}), "
+                f"or cached CONCH features ({feature_path}) for slide {slide_id}."
+            )
+
+        longnet_dict: Dict[str, torch.Tensor] = {}
+        gmm_dict: Dict[str, torch.Tensor] = {}
+        for lvl, scale in enumerate(ALPACA_SCALE_ORDER):
+            feat_np, coords_np = scales_data[scale]
+            proto_np = self.prototypes[scale]
+            gmm_tok_np = soft_assign_gmm_tokens(feat_np, proto_np, tau=tau)
+
+            longnet_dict[f"fea{lvl}"] = torch.from_numpy(feat_np.astype(np.float32))
+            longnet_dict[f"cor{lvl}"] = torch.from_numpy(coords_np.astype(np.int64))
+            gmm_key = ALPACA_SCALE_TO_GMM_KEY[scale]
+            gmm_dict[gmm_key] = torch.from_numpy(gmm_tok_np.astype(np.float32))
+
+        payload: Dict[str, Any] = {
+            "slide_id": slide_id,
+            "cohort": cohort,
+            "longnet": longnet_dict,
+            "gmm": gmm_dict,
+        }
+        tmp_path = out_dir / f".{safe_stem}.{os.getpid()}.pt"
+        torch.save(payload, tmp_path)
+        tmp_path.replace(out_path)
+        return payload
+

@@ -20,6 +20,7 @@ from src.datasets.slidebench_vqa import (
     select_stratified_pilot_samples,
 )
 from src.evaluation.vqa_metrics import compute_vqa_metrics, extract_closed_vqa_choice
+from src.models.alpaca import ALPaCAAdapter
 from src.models.base import BaseWSIVLM
 from src.models.mllm_hwsi import MLLMHWSIAdapter
 from src.models.prism2 import PRISM2Adapter
@@ -58,6 +59,8 @@ def build_model_adapter(
         return PRISM2Adapter(paths=paths, device=device)
     if model_key == "mllm-hwsi":
         return MLLMHWSIAdapter(paths=paths, device=device)
+    if model_key == "alpaca":
+        return ALPaCAAdapter(paths=paths, device=device)
     raise NotImplementedError(
         f"Model adapter '{model_key}' is not yet registered in Stage 1 runner."
     )
@@ -133,7 +136,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--model",
-        choices=["slidechat", "prism2", "mllm-hwsi"],
+        choices=["slidechat", "prism2", "mllm-hwsi", "alpaca"],
         default="slidechat",
         help="Target WSI VLM to evaluate (default: slidechat).",
     )
@@ -199,7 +202,7 @@ def main() -> int:
         cohort_samples = load_slidebench_vqa_cohort(
             datasets_dir=paths.datasets_dir,
             cohort=cohort,
-            require_features=(args.model == "slidechat"),
+            require_features=(args.model in ("slidechat", "alpaca")),
             require_wsi=(args.require_wsi or args.model in ("prism2", "mllm-hwsi")),
         )
         if args.limit > 0:

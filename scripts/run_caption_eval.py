@@ -112,6 +112,10 @@ def build_model_adapter(
         from src.models.mllm_hwsi import MLLMHWSIAdapter
 
         return MLLMHWSIAdapter(paths=paths, device=device)
+    if model_key == "alpaca":
+        from src.models.alpaca import ALPaCAAdapter
+
+        return ALPaCAAdapter(paths=paths, device=device)
 
     raise NotImplementedError(
         f"Model adapter '{model_key}' is not registered in Stage 2 runner."
@@ -216,7 +220,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--model",
-        choices=["slidechat", "prism2", "mllm-hwsi"],
+        choices=["slidechat", "prism2", "mllm-hwsi", "alpaca"],
         default="slidechat",
         help="Target WSI VLM to evaluate (default: slidechat).",
     )
@@ -303,7 +307,7 @@ def main() -> int:
 
     all_samples: List[CaptionSample] = []
     for cohort in args.cohorts:
-        require_features = False if args.dry_run else (args.model == "slidechat")
+        require_features = False if args.dry_run else (args.model in ("slidechat", "alpaca"))
         require_wsi = (
             False
             if args.dry_run
